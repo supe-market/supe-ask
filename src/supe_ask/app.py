@@ -27,12 +27,9 @@ def create_app() -> FastAPI:
     app = FastAPI(default_response_class=ORJSONResponse, title=settings.app_name)
     app.state.ready = False
     app.state.readiness_reason = "Startup validation has not completed"
-    allow_origin_regex = settings.allowed_origins if settings.allowed_origins == ".*" else None
-    allow_origins = [] if allow_origin_regex else [item.strip() for item in settings.allowed_origins.split(",") if item.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allow_origins,
-        allow_origin_regex=allow_origin_regex,
+        allow_origin_regex=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
