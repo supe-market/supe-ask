@@ -80,6 +80,9 @@ async def verify_oauth_code(oauth_code: str) -> tuple[str, AuthUser] | None:
     )
 
 
+FRESH_MARKER_COOKIE = "AUTH_FRESH_SUPE_ASK"
+
+
 def _cookie_options(request: Request) -> dict[str, Any]:
     forwarded_proto = request.headers.get("x-forwarded-proto", "")
     is_https = request.url.scheme == "https" or "https" in forwarded_proto
@@ -90,15 +93,30 @@ def _cookie_options(request: Request) -> dict[str, Any]:
         "secure": secure,
         "samesite": same_site,
         "path": "/",
+        "max_age": settings.session_ttl_seconds,
     }
+
+
+def _marker_cookie_options(request: Request) -> dict[str, Any]:
+    # Same security flags as the auth cookie, but max_age is half the TTL so
+    # the marker disappears at the halfway point and triggers a refresh.
+    opts = _cookie_options(request)
+    opts["max_age"] = settings.session_ttl_seconds // 2
+    return opts
 
 
 def set_auth_cookie(request: Request, response: Response, token: str) -> None:
     response.set_cookie(settings.ask_cookie_name, token, **_cookie_options(request))
+    response.set_cookie(FRESH_MARKER_COOKIE, "1", **_marker_cookie_options(request))
 
 
 def clear_auth_cookie(request: Request, response: Response) -> None:
     response.delete_cookie(settings.ask_cookie_name, path="/")
+    response.delete_cookie(FRESH_MARKER_COOKIE, path="/")
+
+
+def _is_session_fresh(request: Request) -> bool:
+    return bool(request.cookies.get(FRESH_MARKER_COOKIE))
 
 
 def extract_request_token(request: Request) -> str | None:
@@ -109,12 +127,17 @@ def extract_request_token(request: Request) -> str | None:
     return header_token.strip() if header_token else None
 
 
-async def require_auth(request: Request) -> AuthUser:
+async def require_auth(request: Request, response: Response) -> AuthUser:
     token = extract_request_token(request)
     if not token:
         raise HTTPException(status_code=403, detail="No token present")
     user = await verify_session_token(token)
     if not user:
         raise HTTPException(status_code=403, detail="Token is invalid")
+    # Sliding window with halfway-point refresh: only re-issue the cookie
+    # once the short-lived marker has expired. Avoids a Set-Cookie header
+    # on every request.
+    if not _is_session_fresh(request):
+        set_auth_cookie(request, response, token)
     return user
 

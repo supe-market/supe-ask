@@ -64,6 +64,9 @@ class Settings:
     ask_cookie_name: str = _env("ASK_COOKIE_NAME", "AUTH_TOKEN_COOKIE_SUPE_ASK")
     ask_cookie_secure: bool = _env_bool("ASK_COOKIE_SECURE", False)
     ask_cookie_same_site: str = _env("ASK_COOKIE_SAME_SITE", "lax")
+    # Sliding session window in seconds. Default: 2 hours of inactivity → logout.
+    # Matches auth-service SESSION_TTL_SECONDS.
+    session_ttl_seconds: int = int(_env("SESSION_TTL_SECONDS", str(2 * 60 * 60)))
 
     ask_llm_provider: str = _env("ASK_LLM_PROVIDER", "vertex_gemini")
     gcp_project_id: str = _env("GCP_PROJECT_ID", _env("GOOGLE_CLOUD_PROJECT", ""))
