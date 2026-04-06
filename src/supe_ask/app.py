@@ -52,9 +52,17 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_tasks() -> None:
         logger.info("Validating supe-ask startup dependencies", extra={"provider": settings.ask_llm_provider})
-        llm_service.validate_provider()
-        app.state.ready = True
-        app.state.readiness_reason = ""
+        try:
+            llm_service.validate_provider()
+            app.state.ready = True
+            app.state.readiness_reason = ""
+        except Exception as error:
+            # Don't hard-fail startup if the LLM provider is misconfigured —
+            # cookie/auth routes should still work so users can sign in.
+            # /health/ready will report 503 and LLM-backed routes will fail lazily.
+            logger.error("LLM provider validation failed; starting in degraded mode: %s", error)
+            app.state.ready = False
+            app.state.readiness_reason = f"LLM provider unavailable: {error}"
         execution_reconciler.start()
 
     @app.on_event("shutdown")
