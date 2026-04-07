@@ -55,7 +55,7 @@ async def validate_or_create_cookie(request: Request, response: Response, oauthC
         set_auth_cookie(request, response, token)
         return {"success": True, "message": "cookie-set", "tenantId": user.tenant_id}
 
-    user = await require_auth(request)
+    user = await require_auth(request, response)
     return {"success": True, "message": "cookie-valid", "tenantId": user.tenant_id}
 
 
