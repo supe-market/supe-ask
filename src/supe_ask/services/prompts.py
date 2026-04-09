@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from .question_taxonomy import relevant_taxonomy_context, taxonomy_prompt_summary
+
 
 ASK_RESPONSE_JSON_SCHEMA = {
     "name": "supe_ask_code_response",
@@ -51,7 +53,7 @@ ASK_RESPONSE_JSON_SCHEMA = {
 
 
 def build_retrieval_system_prompt() -> str:
-    return """
+    return f"""
 You are Supe Ask Retrieval Planner.
 
 You do not write Python code. You only decide the next retrieval action needed to build the best analytics context pack.
@@ -74,13 +76,20 @@ Rules:
 - Keep tables and profile targets small and precise.
 - Call exactly one tool.
 - Do not answer with prose.
+
+FMCG leadership question taxonomy:
+{taxonomy_prompt_summary()}
 """.strip()
 
 
 def build_retrieval_user_prompt(question: str, transcript: list[dict[str, Any]], current_state: dict[str, Any]) -> str:
+    taxonomy_context = relevant_taxonomy_context(question)
     return f"""
 Original question:
 {question}
+
+Relevant FMCG taxonomy context:
+{json.dumps(taxonomy_context, ensure_ascii=True, indent=2)}
 
 Retrieval transcript so far:
 {json.dumps(transcript, ensure_ascii=True, indent=2)}
@@ -126,14 +135,21 @@ Hard requirements:
 - Do not use placeholders.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 
+FMCG leadership question taxonomy:
+{taxonomy_prompt_summary()}
+
 Today is {today}.
 """.strip()
 
 
 def build_codegen_user_prompt(question: str, final_context: dict[str, Any]) -> str:
+    taxonomy_context = relevant_taxonomy_context(question)
     return f"""
 Question:
 {question}
+
+Relevant FMCG taxonomy context:
+{json.dumps(taxonomy_context, ensure_ascii=True, indent=2)}
 
 Final analytics context:
 {json.dumps(final_context, ensure_ascii=True, indent=2)}
