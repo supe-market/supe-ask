@@ -403,6 +403,20 @@ class AskRepository:
             [tenant_id],
         )
 
+    def get_latest_semantic_pack_version(self, tenant_id: str) -> dict[str, Any] | None:
+        return db.fetch_one(
+            """
+            select id, tenant_id, semantic_pack_id, refresh_id, source_path, status,
+                   cluster_count, canonical_question_count, variant_count, entity_count, metric_count,
+                   created_at, updated_at
+            from ask_semantic_pack_versions
+            where tenant_id = %s
+            order by created_at desc
+            limit 1
+            """,
+            [tenant_id],
+        )
+
     def search_catalog_tables(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
         where_sql, params = _build_search_filter(
             ["table_name", "coalesce(display_name, '')", "coalesce(description, '')", "search_text"],
@@ -539,6 +553,123 @@ class AskRepository:
             from ask_catalog_relationships
             where tenant_id = %s
             order by from_table asc, to_table asc
+            """,
+            [tenant_id],
+        )
+
+    def search_question_clusters(self, tenant_id: str, terms: list[str], limit: int = 12) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["cluster_key", "title", "description", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_question_clusters
+            where tenant_id = %s
+              and ({where_sql})
+            order by cluster_number asc, title asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def search_canonical_questions(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["canonical_question", "primary_entity", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_canonical_questions
+            where tenant_id = %s
+              and ({where_sql})
+            order by question_number asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def search_question_variants(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["variant_text", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_question_variants
+            where tenant_id = %s
+              and ({where_sql})
+            order by canonical_question_number asc, ordinal_position asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def search_entities(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["entity_key", "display_name", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_entities
+            where tenant_id = %s
+              and ({where_sql})
+            order by display_name asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def search_metrics(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["metric_key", "display_name", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_metrics
+            where tenant_id = %s
+              and ({where_sql})
+            order by display_name asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def search_metric_aliases(self, tenant_id: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+        where_sql, params = _build_search_filter(["metric_key", "alias", "search_text"], terms)
+        return db.fetch_all(
+            f"""
+            select *
+            from ask_metric_aliases
+            where tenant_id = %s
+              and ({where_sql})
+            order by weight desc, alias asc
+            limit %s
+            """,
+            [tenant_id, *params, limit],
+        )
+
+    def list_join_policies(self, tenant_id: str) -> list[dict[str, Any]]:
+        return db.fetch_all(
+            """
+            select *
+            from ask_join_policies
+            where tenant_id = %s
+            order by from_table asc, to_table asc
+            """,
+            [tenant_id],
+        )
+
+    def list_date_policies(self, tenant_id: str) -> list[dict[str, Any]]:
+        return db.fetch_all(
+            """
+            select *
+            from ask_date_policies
+            where tenant_id = %s
+            order by policy_key asc
+            """,
+            [tenant_id],
+        )
+
+    def list_threshold_policies(self, tenant_id: str) -> list[dict[str, Any]]:
+        return db.fetch_all(
+            """
+            select *
+            from ask_threshold_policies
+            where tenant_id = %s
+            order by policy_key asc
             """,
             [tenant_id],
         )

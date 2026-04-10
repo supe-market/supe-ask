@@ -35,57 +35,32 @@ class RetrievalServiceTests(unittest.TestCase):
         self.assertEqual(path["toTable"], "distributors")
         self.assertEqual(len(path["edges"]), 3)
 
-    def test_multihop_retrieval_builds_final_context(self):
+    def test_semantic_retrieval_builds_final_context(self):
         service = RetrievalService()
         events: list[tuple[str, dict]] = []
         latest_refresh = {"status": "completed", "completed_at": datetime.now(timezone.utc)}
-        actions = [
-            {
-                "action": "search_catalog",
-                "reason": "Find tables",
-                "search_terms": ["revenue", "salesman"],
-                "tables": [],
-                "from_table": "",
-                "to_table": "",
-                "profile_targets": [],
-            },
-            {
-                "action": "expand_tables",
-                "reason": "Inspect tables",
-                "search_terms": [],
-                "tables": ["sales_orders"],
-                "from_table": "",
-                "to_table": "",
-                "profile_targets": [],
-            },
-            {
-                "action": "expand_graph_neighbors",
-                "reason": "Expand neighbors",
-                "search_terms": [],
-                "tables": ["sales_orders"],
-                "from_table": "",
-                "to_table": "",
-                "profile_targets": [],
-            },
-            {
-                "action": "resolve_join_path",
-                "reason": "Resolve joins",
-                "search_terms": [],
-                "tables": [],
-                "from_table": "sales_orders",
-                "to_table": "salesmen",
-                "profile_targets": [],
-            },
-            {
-                "action": "finalize_context",
-                "reason": "Enough context",
-                "search_terms": [],
-                "tables": ["sales_orders", "salesmen"],
-                "from_table": "",
-                "to_table": "",
-                "profile_targets": [],
-            },
-        ]
+        semantic_version = {
+            "status": "completed",
+            "cluster_count": 1,
+            "canonical_question_count": 1,
+            "variant_count": 1,
+            "entity_count": 1,
+            "metric_count": 1,
+        }
+        grounding = {
+            "reasoning": "Revenue by salesman maps to the revenue cluster.",
+            "canonical_question_number": 1,
+            "cluster_key": "revenue_billing_performance",
+            "intent": "compare",
+            "matched_entities": ["salesman"],
+            "matched_metrics": ["revenue"],
+            "matched_time_grain": "mtd",
+            "filters": [],
+            "grouping": ["salesman"],
+            "outputs": ["table"],
+            "confidence": 0.93,
+            "fallback_used": False,
+        }
 
         search_tables = [
             {
@@ -245,12 +220,52 @@ class RetrievalServiceTests(unittest.TestCase):
                 "references_column": None,
             },
         ]
+        semantic_clusters = [
+            {
+                "id": "cluster-1",
+                "cluster_key": "revenue_billing_performance",
+                "title": "Revenue & Billing Performance",
+                "description": "Revenue questions",
+            }
+        ]
+        canonical_questions = [
+            {
+                "id": "question-1",
+                "cluster_key": "revenue_billing_performance",
+                "question_number": 1,
+                "canonical_question": "What is my total secondary revenue MTD?",
+                "primary_entity": "Salesman",
+            }
+        ]
+        semantic_entities = [{"entity_key": "salesman", "display_name": "Salesman"}]
+        semantic_metrics = [{"metric_key": "revenue", "display_name": "Revenue"}]
+        semantic_metric_aliases = [{"metric_key": "revenue", "alias": "billing", "weight": 3}]
+        semantic_date_policies = [{"policy_key": "wall_clock_primary_refresh-1", "date_column": "order_sale_date", "time_grains": ["mtd", "monthly"]}]
+        semantic_threshold_policies = [{"policy_key": "revenue_alert", "metric_key": "revenue", "threshold_name": "low", "comparator": "<"}]
 
         with patch("supe_ask.services.retrieval.repository.count_catalog_tables", return_value=2), patch(
             "supe_ask.services.retrieval.repository.get_latest_catalog_refresh", return_value=latest_refresh
         ), patch(
+            "supe_ask.services.retrieval.repository.get_latest_semantic_pack_version", return_value=semantic_version
+        ), patch(
             "supe_ask.services.retrieval.graph_cache_service.load_snapshot", return_value=graph_snapshot
-        ), patch("supe_ask.services.retrieval.llm_service.plan_next_retrieval_action", side_effect=actions), patch(
+        ), patch("supe_ask.services.retrieval.llm_service.resolve_question_grounding", return_value=grounding), patch(
+            "supe_ask.services.retrieval.repository.search_question_clusters", return_value=semantic_clusters
+        ), patch(
+            "supe_ask.services.retrieval.repository.search_canonical_questions", return_value=canonical_questions
+        ), patch(
+            "supe_ask.services.retrieval.repository.search_question_variants", return_value=[]
+        ), patch(
+            "supe_ask.services.retrieval.repository.search_entities", return_value=semantic_entities
+        ), patch(
+            "supe_ask.services.retrieval.repository.search_metrics", return_value=semantic_metrics
+        ), patch(
+            "supe_ask.services.retrieval.repository.search_metric_aliases", return_value=semantic_metric_aliases
+        ), patch(
+            "supe_ask.services.retrieval.repository.list_date_policies", return_value=semantic_date_policies
+        ), patch(
+            "supe_ask.services.retrieval.repository.list_threshold_policies", return_value=semantic_threshold_policies
+        ), patch(
             "supe_ask.services.retrieval.repository.search_catalog_tables", return_value=search_tables
         ), patch(
             "supe_ask.services.retrieval.repository.search_catalog_columns", return_value=search_columns
@@ -265,14 +280,17 @@ class RetrievalServiceTests(unittest.TestCase):
         ), patch(
             "supe_ask.services.retrieval.repository.list_catalog_relationships", return_value=search_relationships
         ):
-            result = service._plan_and_retrieve_from_catalog("12", "Compare revenue by salesman", lambda event_type, payload: events.append((event_type, payload)))
+            result = service.plan_and_retrieve("12", "Compare revenue by salesman", lambda event_type, payload: events.append((event_type, payload)))
 
-        self.assertEqual(result["strategy"], "catalog_graph_multihop")
+        self.assertEqual(result["strategy"], "semantic_catalog_graph")
         self.assertEqual([item["tableName"] for item in result["finalContext"]["relevantTables"]], ["sales_orders", "salesmen"])
         self.assertEqual(len(result["joinPaths"]), 1)
-        self.assertEqual(result["finalContext"]["graphNeighborhood"]["neighborTables"], ["salesmen"])
-        self.assertTrue(any(event_type == "run.retrieval.action" for event_type, _ in events))
-        self.assertTrue(any(step["action"] == "finalize_context" for step in result["steps"]))
+        self.assertEqual(result["finalContext"]["graphNeighborhood"]["neighborTables"], [])
+        self.assertEqual(result["questionGrounding"]["canonical_question_id"], "question-1")
+        self.assertEqual(result["finalContext"]["semanticPolicies"]["datePolicies"], semantic_date_policies)
+        self.assertEqual(result["finalContext"]["semanticPolicies"]["thresholdPolicies"], semantic_threshold_policies)
+        self.assertEqual(result["finalContext"]["semanticPolicies"]["metricAliases"], semantic_metric_aliases)
+        self.assertTrue(any(event_type == "run.retrieval.grounding.completed" for event_type, _ in events))
 
 
 if __name__ == "__main__":

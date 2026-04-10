@@ -61,19 +61,22 @@ class VertexGeminiProviderTests(unittest.TestCase):
             with self.assertRaises(LLMAuthenticationError):
                 provider.validate()
 
-    def test_plan_next_retrieval_action_uses_function_call_payload(self):
-        response = _FakeResponse(
-            function_calls=[
-                {
-                    "name": "resolve_join_path",
-                    "args": {
-                        "reason": "The answer needs both tables.",
-                        "from_table": "sales_orders",
-                        "to_table": "salesmen",
-                    },
-                }
-            ]
-        )
+    def test_resolve_question_grounding_prefers_parsed_response(self):
+        payload = {
+            "reasoning": "Revenue by salesman maps to the revenue cluster.",
+            "canonical_question_number": 1,
+            "cluster_key": "revenue_billing_performance",
+            "intent": "compare",
+            "matched_entities": ["salesman"],
+            "matched_metrics": ["revenue"],
+            "matched_time_grain": "mtd",
+            "filters": [],
+            "grouping": ["salesman"],
+            "outputs": ["table"],
+            "confidence": 0.94,
+            "fallback_used": False,
+        }
+        response = _FakeResponse(parsed=payload)
         client = _FakeClient(response)
         provider = VertexGeminiProvider(
             client=client,
@@ -82,22 +85,11 @@ class VertexGeminiProviderTests(unittest.TestCase):
             location="us-central1",
         )
 
-        action = provider.plan_next_retrieval_action("Show revenue by salesman", [], {"candidateTables": []})
+        action = provider.resolve_question_grounding("Show revenue by salesman", {"clusters": []})
 
-        self.assertEqual(
-            action,
-            {
-                "action": "resolve_join_path",
-                "reason": "The answer needs both tables.",
-                "search_terms": [],
-                "tables": [],
-                "from_table": "sales_orders",
-                "to_table": "salesmen",
-                "profile_targets": [],
-            },
-        )
+        self.assertEqual(action, payload)
         self.assertEqual(client.models.calls[0]["model"], "gemini-2.5-flash")
-        self.assertIn("tools", client.models.calls[0]["config"])
+        self.assertEqual(client.models.calls[0]["config"]["response_mime_type"], "application/json")
 
     def test_generate_analysis_prefers_parsed_response(self):
         payload = {
@@ -121,6 +113,40 @@ class VertexGeminiProviderTests(unittest.TestCase):
         self.assertEqual(response, payload)
         self.assertEqual(client.models.calls[0]["model"], "gemini-2.5-pro")
         self.assertEqual(client.models.calls[0]["config"]["response_mime_type"], "application/json")
+
+    def test_generate_analysis_includes_semantic_policies_in_prompt(self):
+        payload = {
+            "title": "Revenue report",
+            "assistant_summary": "Summarize revenue.",
+            "python_code": "print('ok')",
+            "artifact_plan": {"artifacts": []},
+            "follow_up_needed": False,
+            "follow_up_question": "",
+        }
+        client = _FakeClient(_FakeResponse(parsed=payload))
+        provider = VertexGeminiProvider(
+            client=client,
+            credentials_resolver=lambda: (object(), "discovered-project"),
+            project_id="project-1",
+            location="us-central1",
+        )
+
+        provider.generate_analysis(
+            "Revenue",
+            {
+                "relevantTables": [],
+                "semanticPolicies": {
+                    "datePolicies": [{"policy_key": "wall_clock_primary_refresh-1"}],
+                    "thresholdPolicies": [{"policy_key": "revenue_alert"}],
+                    "metricAliases": [{"metric_key": "revenue", "alias": "billing"}],
+                },
+            },
+        )
+
+        contents = client.models.calls[0]["contents"]
+        self.assertIn('"semanticPolicies"', contents)
+        self.assertIn('"datePolicies"', contents)
+        self.assertIn('"thresholdPolicies"', contents)
 
     def test_generate_analysis_raises_when_response_is_not_parseable(self):
         provider = VertexGeminiProvider(

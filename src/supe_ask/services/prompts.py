@@ -4,7 +4,43 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from .question_taxonomy import relevant_taxonomy_context, taxonomy_prompt_summary
+
+SEMANTIC_RESOLUTION_JSON_SCHEMA = {
+    "name": "supe_ask_semantic_resolution",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "reasoning": {"type": "string"},
+            "canonical_question_number": {"type": ["integer", "null"]},
+            "cluster_key": {"type": "string"},
+            "intent": {"type": "string"},
+            "matched_entities": {"type": "array", "items": {"type": "string"}},
+            "matched_metrics": {"type": "array", "items": {"type": "string"}},
+            "matched_time_grain": {"type": "string"},
+            "filters": {"type": "array", "items": {"type": "string"}},
+            "grouping": {"type": "array", "items": {"type": "string"}},
+            "outputs": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+            "fallback_used": {"type": "boolean"},
+        },
+        "required": [
+            "reasoning",
+            "canonical_question_number",
+            "cluster_key",
+            "intent",
+            "matched_entities",
+            "matched_metrics",
+            "matched_time_grain",
+            "filters",
+            "grouping",
+            "outputs",
+            "confidence",
+            "fallback_used",
+        ],
+    },
+}
 
 
 ASK_RESPONSE_JSON_SCHEMA = {
@@ -52,52 +88,49 @@ ASK_RESPONSE_JSON_SCHEMA = {
 }
 
 
-def build_retrieval_system_prompt() -> str:
+def _grounding_summary(grounding_context: dict[str, Any]) -> str:
+    summary = grounding_context.get("summary") or {}
+    lines = [
+        "Resident semantic catalog summary:",
+        f"- clusters: {summary.get('clusterCount', 0)}",
+        f"- canonical_questions: {summary.get('canonicalQuestionCount', 0)}",
+        f"- variants: {summary.get('variantCount', 0)}",
+        f"- entities: {summary.get('entityCount', 0)}",
+        f"- metrics: {summary.get('metricCount', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+def build_semantic_resolution_system_prompt(grounding_context: dict[str, Any]) -> str:
     return f"""
-You are Supe Ask Retrieval Planner.
+You are Supe Ask Semantic Resolver.
 
-You do not write Python code. You only decide the next retrieval action needed to build the best analytics context pack.
+Your job is to resolve the user's business question against a resident FMCG semantic catalog.
 
-Available actions:
-- search_catalog: find relevant tables, aliases, columns, metrics, and relationships
-- expand_tables: inspect full metadata for a small set of candidate tables
-- expand_graph_neighbors: expand adjacent tables from the schema graph around strong seeds
-- resolve_join_path: request the join path between two tables
-- profile_columns: request lightweight live-data profiling for a few columns
-- finalize_context: stop retrieval and finalize the code-generation context
+Return JSON only matching the provided schema.
 
 Rules:
-- Use the fewest steps needed.
-- Prefer search_catalog first if you do not yet have strong table candidates.
-- Use expand_tables before profile_columns.
-- Use expand_graph_neighbors when one or two seed tables need nearby dimensions or bridge tables.
-- Use resolve_join_path only when multiple tables are needed together.
-- Use profile_columns only when metadata is insufficient to disambiguate time, status, or metric columns.
-- Keep tables and profile targets small and precise.
-- Call exactly one tool.
-- Do not answer with prose.
+- Choose the most relevant canonical question family from the provided candidates.
+- Prefer the provided semantic candidates over inventing new entities or metrics.
+- Keep time semantics explicit. If the question is month-oriented and does not specify otherwise, prefer MTD.
+- Resolve business language like billing -> revenue, coverage -> coverage, outstanding -> outstanding, collection -> collection.
+- Use only entity and metric keys present in the provided candidates when possible.
+- Set fallback_used=true only if the candidates were weak and you had to infer beyond exact matches.
+- Confidence must be between 0 and 1.
 
-FMCG leadership question taxonomy:
-{taxonomy_prompt_summary()}
+{_grounding_summary(grounding_context)}
 """.strip()
 
 
-def build_retrieval_user_prompt(question: str, transcript: list[dict[str, Any]], current_state: dict[str, Any]) -> str:
-    taxonomy_context = relevant_taxonomy_context(question)
+def build_semantic_resolution_user_prompt(question: str, grounding_context: dict[str, Any]) -> str:
     return f"""
-Original question:
+Question:
 {question}
 
-Relevant FMCG taxonomy context:
-{json.dumps(taxonomy_context, ensure_ascii=True, indent=2)}
+Semantic candidates:
+{json.dumps(grounding_context, ensure_ascii=True, indent=2)}
 
-Retrieval transcript so far:
-{json.dumps(transcript, ensure_ascii=True, indent=2)}
-
-Current retrieval state:
-{json.dumps(current_state, ensure_ascii=True, indent=2)}
-
-Choose the single best next action by calling exactly one available tool.
+Resolve the question into a typed semantic grounding.
 """.strip()
 
 
@@ -126,7 +159,8 @@ Hard requirements:
 - Always respect tenant-safe access by querying only through query_df.
 - Every SQL statement must contain the literal placeholder {{tenant_filter}}.
 - If a table is aliased, call query_df(..., tenant_id_column="alias.tenant_id") so the runtime can expand {{tenant_filter}} safely.
-- Prefer tables and join paths from the provided finalContext over inventing your own structure.
+- Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
+- Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
 - Prefer emit_markdown and emit_metric for report sections and KPI outputs.
 - Use display(df) or emit_table(...) for tabular outputs.
 - Use plotly for charts. fig.show() is supported and will be captured automatically. emit_plotly(...) is also supported.
@@ -135,21 +169,14 @@ Hard requirements:
 - Do not use placeholders.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 
-FMCG leadership question taxonomy:
-{taxonomy_prompt_summary()}
-
 Today is {today}.
 """.strip()
 
 
 def build_codegen_user_prompt(question: str, final_context: dict[str, Any]) -> str:
-    taxonomy_context = relevant_taxonomy_context(question)
     return f"""
 Question:
 {question}
-
-Relevant FMCG taxonomy context:
-{json.dumps(taxonomy_context, ensure_ascii=True, indent=2)}
 
 Final analytics context:
 {json.dumps(final_context, ensure_ascii=True, indent=2)}
