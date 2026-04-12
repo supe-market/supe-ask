@@ -12,6 +12,7 @@ ALLOWED_IMPORTS = {
     "supe_lib.db",
     "supe_lib.display",
     "supe_lib.dataframes",
+    "supe_lib.charts",
     "supe_lib.metrics",
     "supe_lib.plotting",
     "supe_lib.report",

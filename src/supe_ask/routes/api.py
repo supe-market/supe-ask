@@ -95,6 +95,16 @@ async def create_thread(body: CreateThreadBody, user: AuthUser = Depends(require
     return {"success": True, "data": {"thread": thread}}
 
 
+@router.delete("/api/v1/ask/threads/{thread_id}")
+async def delete_thread(thread_id: str, user: AuthUser = Depends(require_auth)):
+    """Archive an Ask thread so it disappears from the sidebar."""
+    thread = repository.get_thread(user.tenant_id, thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    repository.archive_thread(user.tenant_id, thread_id)
+    return {"success": True}
+
+
 @router.get("/api/v1/ask/threads/{thread_id}")
 async def get_thread(thread_id: str, user: AuthUser = Depends(require_auth)):
     """Load a thread together with its messages, runs, events, and artifacts."""

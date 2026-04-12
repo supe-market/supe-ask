@@ -193,8 +193,9 @@ Hard requirements:
   - import pandas as pd
   - import plotly.express as px
   - import plotly.graph_objects as go
+  - from supe_lib.charts import bar_chart, line_chart, pie_chart, waterfall_chart
   - from supe_lib.db import query_df
-  - from supe_lib.report import emit_markdown, emit_metric, emit_table, emit_plotly, progress
+  - from supe_lib.report import emit_markdown, emit_metric, emit_table, emit_plotly, progress, emit_kpi_card, emit_section, emit_summary, fmt_currency, fmt_percent, fmt_number
   - from supe_lib.display import display
   - from supe_lib.metrics import safe_percent, percent_delta, growth_rate
   - from supe_lib.time import period_bounds
@@ -205,11 +206,20 @@ Hard requirements:
 - If a table is aliased, call query_df(..., tenant_id_column="alias.tenant_id") so the runtime can expand {{tenant_filter}} safely.
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
+- Do not answer a business metric question by merely selecting one pre-aggregated row from a snapshot or summary table unless the user explicitly asked for a stored snapshot metric.
+- Prefer calculating the requested metric from the most granular relevant fact tables available in final_context. Use summary tables only as a fallback or benchmark.
+- Every executive answer must feel like a dashboard, not a single-number lookup.
+- For KPI-style questions, generate:
+  - 3 to 6 KPI cards using emit_kpi_card or emit_metric
+  - at least 1 chart (trend, distribution, ranking, or waterfall) when there are enough rows
+  - at least 1 supporting table or ranking cut
+  - related analysis around likely follow-up topics such as trend, contributor breakdown, concentration, and exceptions
+- Use emit_section to structure the report into visible blocks such as overview, trend, contributor breakdown, and risks/opportunities.
 - Prepare a leadership-console answer shape, not a generic chatbot response.
 - The artifact_plan.report_sections field must describe the major answer blocks in display order.
-- The artifact_plan.key_highlights field must contain concise ranked callouts with business value strings and semantic tone labels such as easy, medium, warning, positive, or critical.
+- The artifact_plan.key_highlights field must contain concise ranked business callouts with concrete business-facing values or impact strings. Never use implementation placeholders such as "calculated in script", "computed at runtime", "from SQL", or "from query".
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
-- Prefer emit_markdown and emit_metric for report sections and KPI outputs.
+- Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.
 - Use display(df) or emit_table(...) for tabular outputs.
 - Use plotly for charts. fig.show() is supported and will be captured automatically. emit_plotly(...) is also supported.
 - Use progress(...) or print("Progress: ...") for concise execution updates.

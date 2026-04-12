@@ -79,7 +79,19 @@ class AskRepository:
 
     def get_thread(self, tenant_id: str, thread_id: str) -> dict[str, Any] | None:
         return db.fetch_one(
-            "select * from ask_threads where tenant_id = %s and id = %s limit 1",
+            "select * from ask_threads where tenant_id = %s and id = %s and archived = false limit 1",
+            [tenant_id, thread_id],
+        )
+
+    def archive_thread(self, tenant_id: str, thread_id: str) -> dict[str, Any] | None:
+        """Soft-delete a thread so it disappears from the Ask UI."""
+        return db.execute_returning(
+            """
+            update ask_threads
+            set archived = true, updated_at = now()
+            where tenant_id = %s and id = %s and archived = false
+            returning id
+            """,
             [tenant_id, thread_id],
         )
 
