@@ -118,6 +118,7 @@ class LocalRunner:
                         on_event({"type": "error", "payload": payload})
                     else:
                         stdout_logs.append(line)
+                        on_event({"type": "stdout", "payload": {"line": line}})
                 stderr_output = process.stderr.read().strip() if process.stderr else ""
                 if stderr_output:
                     stdout_logs.extend([line for line in stderr_output.splitlines() if line])

@@ -57,6 +57,14 @@ class ExecutionCallbackService:
             return {"success": True}
 
         if callback_type == "progress":
+            if str(payload.get("kind") or "") == "stdout":
+                emit_run_event(
+                    tenant_id,
+                    run_id,
+                    "run.execution.stdout",
+                    {"line": str(payload.get("stdoutLine") or payload.get("message") or "")},
+                )
+                return {"success": True}
             emit_run_event(tenant_id, run_id, "run.execution.progress", {"message": str(payload.get("message") or "")})
             return {"success": True}
 

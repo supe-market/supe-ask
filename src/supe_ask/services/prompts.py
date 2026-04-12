@@ -57,6 +57,38 @@ ASK_RESPONSE_JSON_SCHEMA = {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "report_sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "title": {"type": "string"},
+                                "subtitle": {"type": "string"},
+                            },
+                            "required": ["title", "subtitle"],
+                        },
+                    },
+                    "key_highlights": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "title": {"type": "string"},
+                                "detail": {"type": "string"},
+                                "value": {"type": "string"},
+                                "tone": {"type": "string"},
+                            },
+                            "required": ["title", "detail", "value", "tone"],
+                        },
+                    },
+                    "suggested_next_questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 3,
+                        "maxItems": 3,
+                    },
                     "artifacts": {
                         "type": "array",
                         "items": {
@@ -71,7 +103,7 @@ ASK_RESPONSE_JSON_SCHEMA = {
                         },
                     }
                 },
-                "required": ["artifacts"],
+                "required": ["report_sections", "key_highlights", "suggested_next_questions", "artifacts"],
             },
             "follow_up_needed": {"type": "boolean"},
             "follow_up_question": {"type": "string"},
@@ -173,6 +205,10 @@ Hard requirements:
 - If a table is aliased, call query_df(..., tenant_id_column="alias.tenant_id") so the runtime can expand {{tenant_filter}} safely.
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
+- Prepare a leadership-console answer shape, not a generic chatbot response.
+- The artifact_plan.report_sections field must describe the major answer blocks in display order.
+- The artifact_plan.key_highlights field must contain concise ranked callouts with business value strings and semantic tone labels such as easy, medium, warning, positive, or critical.
+- The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_markdown and emit_metric for report sections and KPI outputs.
 - Use display(df) or emit_table(...) for tabular outputs.
 - Use plotly for charts. fig.show() is supported and will be captured automatically. emit_plotly(...) is also supported.

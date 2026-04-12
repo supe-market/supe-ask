@@ -75,6 +75,9 @@ class EcsService:
     def run_task(self, **kwargs):
         return self._ecs().run_task(**kwargs)
 
+    def describe_tasks(self, **kwargs):
+        return self._ecs().describe_tasks(**kwargs)
+
     def stop_task(self, **kwargs):
         return self._ecs().stop_task(**kwargs)
 

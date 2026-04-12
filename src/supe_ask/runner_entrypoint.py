@@ -99,6 +99,16 @@ class CallbackClient:
         if event_type == "progress":
             self._post("progress", {"message": str(payload.get("message") or "")})
             return
+        if event_type == "stdout":
+            self._post(
+                "progress",
+                {
+                    "message": str(payload.get("line") or ""),
+                    "kind": "stdout",
+                    "stdoutLine": str(payload.get("line") or ""),
+                },
+            )
+            return
         if event_type == "artifact":
             artifact_type = str(payload.get("artifact_type") or "unknown")
             title = str(payload.get("title") or artifact_type.title())

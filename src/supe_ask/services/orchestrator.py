@@ -31,6 +31,54 @@ class RunCancelled(Exception):
 class AskOrchestrator:
     """Coordinate the control-plane side of an Ask run."""
 
+    def _emit_text_chunks(
+        self,
+        tenant_id: str,
+        run_id: str,
+        event_type: str,
+        text: str,
+        *,
+        chunk_size: int = 140,
+    ) -> None:
+        """Emit deterministic UI-friendly text chunks without needing model streaming support."""
+        content = (text or "").strip()
+        if not content:
+            return
+        buffer = ""
+        index = 0
+        for token in content.split():
+            candidate = f"{buffer} {token}".strip()
+            if buffer and len(candidate) > chunk_size:
+                self._emit(tenant_id, run_id, event_type, {"delta": buffer, "chunkIndex": index})
+                index += 1
+                buffer = token
+            else:
+                buffer = candidate
+        if buffer:
+            self._emit(tenant_id, run_id, event_type, {"delta": buffer, "chunkIndex": index})
+
+    def _build_planning_summary(self, question: str, retrieved: dict[str, Any]) -> str:
+        """Convert retrieval output into a fast leadership-console style narrative."""
+        final_context = retrieved.get("finalContext") or {}
+        grounding = final_context.get("questionGrounding") or {}
+        relevant_tables = final_context.get("relevantTables") or []
+        matched_metrics = grounding.get("matchedMetrics") or []
+        matched_entities = grounding.get("matchedEntities") or []
+        grouping = grounding.get("grouping") or []
+        filters = grounding.get("filters") or []
+        intent = grounding.get("intent") or "summary"
+        parts = [
+            f"Understanding '{question}' as a {intent.replace('_', ' ')} request.",
+            f"Matched metrics: {', '.join(matched_metrics) if matched_metrics else 'none yet'}.",
+            f"Matched entities: {', '.join(matched_entities) if matched_entities else 'none yet'}.",
+            f"Using {len(relevant_tables)} relevant tables.",
+        ]
+        if grouping:
+            parts.append(f"Grouping by {', '.join(grouping)}.")
+        if filters:
+            parts.append(f"Applying filters on {', '.join(filters)}.")
+        return " ".join(parts)
+
     def _emit(self, tenant_id: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Persist and broadcast a run event through the shared event bus."""
         emit_run_event(tenant_id, run_id, event_type, payload)
@@ -69,6 +117,12 @@ class AskOrchestrator:
             self._raise_if_cancelled(tenant_id, run_id)
             repository.update_run(run_id, status="running")
             self._emit(tenant_id, run_id, "run.created", {"threadId": thread_id, "messageId": message_id, "runId": run_id})
+            self._emit_text_chunks(
+                tenant_id,
+                run_id,
+                "run.planning.delta",
+                "Understanding the question against your tenant catalog and preparing a leadership summary.",
+            )
 
             self._emit(tenant_id, run_id, "run.retrieval.started", {"question": question})
             try:
@@ -83,6 +137,12 @@ class AskOrchestrator:
                 return
             repository.update_run(run_id, retrieval_context=retrieved)
             self._raise_if_cancelled(tenant_id, run_id)
+            self._emit_text_chunks(
+                tenant_id,
+                run_id,
+                "run.planning.delta",
+                self._build_planning_summary(question, retrieved),
+            )
             self._emit(
                 tenant_id,
                 run_id,
@@ -93,6 +153,7 @@ class AskOrchestrator:
                     "items": (retrieved.get("finalContext") or {}).get("relevantTables") or [],
                 },
             )
+            self._emit(tenant_id, run_id, "run.planning.completed", {"status": "completed"})
 
             self._emit(tenant_id, run_id, "run.codegen.started", {})
             try:
@@ -120,6 +181,7 @@ class AskOrchestrator:
                     "artifactPlan": response["artifact_plan"],
                 },
             )
+            self._emit_text_chunks(tenant_id, run_id, "run.codegen.delta", response["python_code"], chunk_size=220)
 
             validate_python_code(response["python_code"])
 
@@ -131,6 +193,9 @@ class AskOrchestrator:
                 payload = dict(event.get("payload") or {})
                 if event_type == "progress":
                     self._emit(tenant_id, run_id, "run.execution.progress", payload)
+                    return
+                if event_type == "stdout":
+                    self._emit(tenant_id, run_id, "run.execution.stdout", payload)
                     return
                 if event_type == "artifact":
                     artifact_payload = dict(payload.get("payload") or {})
