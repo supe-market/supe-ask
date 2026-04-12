@@ -35,6 +35,22 @@ Required runtime dependencies:
 - control plane image: `Dockerfile`
 - isolated runner image: `runner.Dockerfile`
 
+If the ECS runner is launched on `linux/amd64`, build and push the runner image
+with an amd64 or multi-arch manifest. Building and pushing from Apple Silicon
+without `buildx --platform ...` can produce an arm64-only image that Fargate
+cannot pull.
+
+Example:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -f supe-ask/runner.Dockerfile \
+  -t <your-ecr-runner-image>:<tag> \
+  --push \
+  .
+```
+
 ## Execution Modes
 
 - `ASK_RUNNER_BACKEND=local`

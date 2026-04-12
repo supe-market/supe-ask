@@ -70,26 +70,64 @@ class AskOrchestrator:
             self._emit(tenant_id, run_id, event_type, {"delta": buffer, "chunkIndex": index})
 
     def _build_planning_summary(self, question: str, retrieved: dict[str, Any]) -> str:
-        """Convert retrieval output into a fast leadership-console style narrative."""
+        """Convert retrieval output into an explicit scope-and-assumptions narrative."""
         final_context = retrieved.get("finalContext") or {}
-        grounding = final_context.get("questionGrounding") or {}
+        analysis_plan = final_context.get("analysisPlan") or {}
         relevant_tables = final_context.get("relevantTables") or []
-        matched_metrics = grounding.get("matchedMetrics") or []
-        matched_entities = grounding.get("matchedEntities") or []
-        grouping = grounding.get("grouping") or []
-        filters = grounding.get("filters") or []
-        intent = grounding.get("intent") or "summary"
-        parts = [
-            f"Understanding '{question}' as a {intent.replace('_', ' ')} request.",
-            f"Matched metrics: {', '.join(matched_metrics) if matched_metrics else 'none yet'}.",
-            f"Matched entities: {', '.join(matched_entities) if matched_entities else 'none yet'}.",
-            f"Using {len(relevant_tables)} relevant tables.",
-        ]
+        matched_metrics = analysis_plan.get("matchedMetrics") or []
+        matched_entities = analysis_plan.get("matchedEntities") or []
+        grouping = analysis_plan.get("grouping") or []
+        filters = analysis_plan.get("filters") or []
+        outputs = analysis_plan.get("outputs") or []
+        intent = str(analysis_plan.get("intent") or "summary").replace("_", " ")
+        time_grain = str(analysis_plan.get("matchedTimeGrain") or "mtd").upper()
+
+        question_lower = question.lower()
+        explicit_time_tokens = (
+            "today",
+            "yesterday",
+            "mtd",
+            "wtd",
+            "qtd",
+            "ytd",
+            "last week",
+            "last month",
+            "this month",
+            "this quarter",
+            "last quarter",
+            "this year",
+            "last year",
+            "month",
+            "quarter",
+            "year",
+            "date",
+        )
+        time_was_explicit = any(token in question_lower for token in explicit_time_tokens)
+
+        assumptions: list[str] = []
+        assumptions.append(f"I am treating this as a {intent} question focused on {', '.join(matched_metrics) if matched_metrics else 'the main business metric'}")
+        if time_was_explicit:
+            assumptions.append(f"I will use the time frame implied in your question, with {time_grain} as the working grain")
+        else:
+            assumptions.append(f"No explicit period was given, so I am starting with {time_grain} and comparing against the previous comparable period where useful")
+        if filters or matched_entities:
+            scope_parts = [*matched_entities, *filters]
+            assumptions.append(f"I will scope the first pass around {', '.join(dict.fromkeys([str(item) for item in scope_parts]))}")
+        else:
+            assumptions.append("No entity or geography filter was specified, so I am starting at total business level before drilling into contributors")
         if grouping:
-            parts.append(f"Grouping by {', '.join(grouping)}.")
-        if filters:
-            parts.append(f"Applying filters on {', '.join(filters)}.")
-        return " ".join(parts)
+            assumptions.append(f"I will break the answer down by {', '.join(grouping)}")
+        else:
+            assumptions.append("No breakdown was requested explicitly, so I will add the most useful contributor cut automatically")
+        if outputs:
+            assumptions.append(f"I will return the result as {', '.join(outputs)}")
+        else:
+            assumptions.append("I will return a leadership-style answer with KPIs, a chart, and a supporting table")
+
+        preface = f"Here is my working plan for '{question}':"
+        table_clause = f"I have {len(relevant_tables)} relevant tables to work with."
+        numbered = " ".join(f"{index}. {item}." for index, item in enumerate(assumptions, start=1))
+        return f"{preface} {numbered} {table_clause}"
 
     def _raise_if_cancelled(self, tenant_id: str, run_id: str) -> None:
         """Stop work early if the run has already been cancelled."""

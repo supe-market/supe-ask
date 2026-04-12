@@ -9,6 +9,22 @@ from .run_events import emit_run_event
 
 
 class ExecutionReconciler:
+    def _normalize_stop_reason(self, reason: str) -> str:
+        """Rewrite common ECS bootstrap failures into actionable operator messages."""
+        normalized = reason.strip()
+        lower = normalized.lower()
+        if "does not contain descriptor matching platform 'linux/amd64'" in lower:
+            return (
+                "Runner image does not include a linux/amd64 manifest. "
+                "Rebuild and push the ECS runner image for linux/amd64 or a multi-arch manifest before retrying."
+            )
+        if "unable to pull secrets or registry auth" in lower and "getauthorizationtoken" in lower:
+            return (
+                "Runner task could not reach Amazon ECR to pull registry auth. "
+                "Check task egress, public IP assignment, or NAT/VPC endpoint configuration."
+            )
+        return normalized
+
     def _resolve_stop_reason(self, execution: dict) -> str:
         """Surface the ECS task stop reason when the task dies before callbacks arrive."""
         task_arn = str(execution.get("task_arn") or "")
@@ -24,12 +40,12 @@ class ExecutionReconciler:
         task = tasks[0] or {}
         stopped_reason = str(task.get("stoppedReason") or "").strip()
         if stopped_reason:
-            return stopped_reason
+            return self._normalize_stop_reason(stopped_reason)
         containers = task.get("containers") or []
         for container in containers:
             reason = str((container or {}).get("reason") or "").strip()
             if reason:
-                return reason
+                return self._normalize_stop_reason(reason)
         return "ECS runner stopped sending heartbeats before completion"
 
     def __init__(self) -> None:

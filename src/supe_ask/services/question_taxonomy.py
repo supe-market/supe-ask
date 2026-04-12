@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""Legacy static taxonomy reference.
+
+The live Ask retrieval path uses the DB-backed semantic catalog tables
+(`ask_question_clusters`, `ask_canonical_questions`, variants, entities,
+metrics, policies) materialized by analytics from the compiled taxonomy.
+
+This module is kept only as a reference/bootstrap artifact and is not currently
+on the hot path for question resolution.
+"""
+
 import re
 from typing import Any
 

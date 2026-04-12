@@ -83,6 +83,11 @@ ASK_RESPONSE_JSON_SCHEMA = {
                             "required": ["title", "detail", "value", "tone"],
                         },
                     },
+                    "working_assumptions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 4,
+                    },
                     "suggested_next_questions": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -209,6 +214,9 @@ Hard requirements:
 - Do not answer a business metric question by merely selecting one pre-aggregated row from a snapshot or summary table unless the user explicitly asked for a stored snapshot metric.
 - Prefer calculating the requested metric from the most granular relevant fact tables available in final_context. Use summary tables only as a fallback or benchmark.
 - Every executive answer must feel like a dashboard, not a single-number lookup.
+- Before answering, reason through the missing scope choices: period, business scope, comparison baseline, and the first useful drill-downs.
+- If the question is underspecified but still answerable, proceed with sensible defaults instead of blocking. Capture those defaults in artifact_plan.working_assumptions as 1 to 4 concise bullets.
+- Only set follow_up_needed=true when the analysis is genuinely blocked by a critical ambiguity or missing dataset.
 - For KPI-style questions, generate:
   - 3 to 6 KPI cards using emit_kpi_card or emit_metric
   - at least 1 chart (trend, distribution, ranking, or waterfall) when there are enough rows
@@ -218,6 +226,7 @@ Hard requirements:
 - Prepare a leadership-console answer shape, not a generic chatbot response.
 - The artifact_plan.report_sections field must describe the major answer blocks in display order.
 - The artifact_plan.key_highlights field must contain concise ranked business callouts with concrete business-facing values or impact strings. Never use implementation placeholders such as "calculated in script", "computed at runtime", "from SQL", or "from query".
+- The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.
 - Use display(df) or emit_table(...) for tabular outputs.
