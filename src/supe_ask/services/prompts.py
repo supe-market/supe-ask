@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 
@@ -101,6 +101,18 @@ def _grounding_summary(grounding_context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_safe(nested_value) for key, nested_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def build_semantic_resolution_system_prompt(grounding_context: dict[str, Any]) -> str:
     return f"""
 You are Supe Ask Semantic Resolver.
@@ -128,7 +140,7 @@ Question:
 {question}
 
 Semantic candidates:
-{json.dumps(grounding_context, ensure_ascii=True, indent=2)}
+{json.dumps(_json_safe(grounding_context), ensure_ascii=True, indent=2)}
 
 Resolve the question into a typed semantic grounding.
 """.strip()
@@ -179,7 +191,7 @@ Question:
 {question}
 
 Final analytics context:
-{json.dumps(final_context, ensure_ascii=True, indent=2)}
+{json.dumps(_json_safe(final_context), ensure_ascii=True, indent=2)}
 
 Return JSON matching the schema. The python_code field must contain a complete executable script.
 """.strip()

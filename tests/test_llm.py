@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from supe_ask.services.llm import (
@@ -10,6 +11,7 @@ from supe_ask.services.llm import (
     NullProvider,
     VertexGeminiProvider,
 )
+from supe_ask.services.prompts import build_codegen_user_prompt, build_semantic_resolution_user_prompt
 
 
 class _FakeModels:
@@ -38,6 +40,47 @@ class _FakeResponse:
 
 
 class VertexGeminiProviderTests(unittest.TestCase):
+    def test_semantic_resolution_prompt_serializes_nested_datetimes(self):
+        prompt = build_semantic_resolution_user_prompt(
+            "What is my total revenue?",
+            {
+                "summary": {"generated_at": datetime(2026, 4, 12, 10, 30, tzinfo=timezone.utc)},
+                "metrics": [
+                    {
+                        "metric_key": "revenue",
+                        "updated_at": datetime(2026, 4, 12, 11, 45, tzinfo=timezone.utc),
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("2026-04-12T10:30:00+00:00", prompt)
+        self.assertIn("2026-04-12T11:45:00+00:00", prompt)
+
+    def test_codegen_prompt_serializes_nested_dates_and_datetimes(self):
+        prompt = build_codegen_user_prompt(
+            "Revenue",
+            {
+                "semanticPolicies": {
+                    "datePolicies": [
+                        {
+                            "policy_key": "wall_clock_primary_refresh-1",
+                            "effective_date": date(2026, 4, 12),
+                        }
+                    ]
+                },
+                "relevantTables": [
+                    {
+                        "tableName": "sales_orders",
+                        "updatedAt": datetime(2026, 4, 12, 12, 0, tzinfo=timezone.utc),
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("2026-04-12", prompt)
+        self.assertIn("2026-04-12T12:00:00+00:00", prompt)
+
     def test_validate_succeeds_with_resolved_credentials(self):
         provider = VertexGeminiProvider(
             client=_FakeClient(),
