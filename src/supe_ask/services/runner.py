@@ -24,6 +24,7 @@ from ..aws_clients import ecs_service, s3_storage
 from ..config import settings
 from ..repository import repository
 from ..security import generate_callback_token, hash_callback_token
+from .warm_pool import warm_pool
 
 EVENT_PREFIX = "__SUPE_ASK_EVENT__"
 ERROR_PREFIX = "__SUPE_ASK_ERROR__"
@@ -309,10 +310,37 @@ def execute_local_run(run_id: str, tenant_id: str, code: str, on_event: Callable
     )
 
 
+class WarmPoolRunner:
+    """Execute Ask code on a warm process pool — ScalarField codebox style.
+
+    Pre-forked workers have pandas/numpy/plotly already imported, cutting
+    subprocess startup from ~3-5s to near-zero.
+    """
+
+    name = "warm_pool"
+
+    def __init__(self) -> None:
+        warm_pool.warm_up()
+
+    def run(
+        self,
+        run_id: str,
+        tenant_id: str,
+        code: str,
+        on_event: Callable[[dict], None],
+    ) -> tuple[int, list[str]]:
+        return warm_pool.run(run_id, tenant_id, code, on_event)
+
+    def cancel(self, run_id: str) -> bool:
+        return warm_pool.cancel(run_id)
+
+
 def _build_runner_backend():
     """Pick the active execution backend from configuration."""
     if settings.runner_backend == "ecs":
         return EcsRunner()
+    if settings.runner_backend == "warm_pool":
+        return WarmPoolRunner()
     return local_runner
 
 

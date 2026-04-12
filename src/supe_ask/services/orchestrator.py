@@ -2,6 +2,10 @@
 
 This service owns the end-to-end lifecycle of a run: retrieval, code generation,
 validation, execution start, and terminal event emission.
+
+The pipeline emits live SSE events at every stage so the frontend can show
+progressive feedback — thinking animation, streamed narrative, token-level
+code streaming, and structured artifacts.
 """
 
 from __future__ import annotations
@@ -30,6 +34,14 @@ class RunCancelled(Exception):
 
 class AskOrchestrator:
     """Coordinate the control-plane side of an Ask run."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _emit(self, tenant_id: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        """Persist and broadcast a run event through the shared event bus."""
+        emit_run_event(tenant_id, run_id, event_type, payload)
 
     def _emit_text_chunks(
         self,
@@ -79,10 +91,6 @@ class AskOrchestrator:
             parts.append(f"Applying filters on {', '.join(filters)}.")
         return " ".join(parts)
 
-    def _emit(self, tenant_id: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        """Persist and broadcast a run event through the shared event bus."""
-        emit_run_event(tenant_id, run_id, event_type, payload)
-
     def _raise_if_cancelled(self, tenant_id: str, run_id: str) -> None:
         """Stop work early if the run has already been cancelled."""
         current = repository.get_run(tenant_id, run_id)
@@ -93,6 +101,10 @@ class AskOrchestrator:
         """Persist a terminal failure and emit one standardized run event."""
         repository.update_run(run_id, status="failed", error_message=message, completed=True)
         self._emit(tenant_id, run_id, "run.failed", {"message": message, "stage": stage, "traceback": traceback})
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def start_run(self, user: AuthUser, thread_id: str, message_id: str, run_id: str, question: str) -> None:
         """Start the Ask pipeline on a background thread."""
@@ -110,6 +122,10 @@ class AskOrchestrator:
         repository.update_run(run_id, status="cancelled", error_message="Run cancelled by user", completed=True)
         self._emit(tenant_id, run_id, "run.cancelled", {"status": "cancelled"})
 
+    # ------------------------------------------------------------------
+    # Pipeline
+    # ------------------------------------------------------------------
+
     def _run_pipeline(self, user: AuthUser, thread_id: str, message_id: str, run_id: str, question: str) -> None:
         """Execute the full Ask flow for one question."""
         tenant_id = user.tenant_id
@@ -117,13 +133,16 @@ class AskOrchestrator:
             self._raise_if_cancelled(tenant_id, run_id)
             repository.update_run(run_id, status="running")
             self._emit(tenant_id, run_id, "run.created", {"threadId": thread_id, "messageId": message_id, "runId": run_id})
-            self._emit_text_chunks(
-                tenant_id,
-                run_id,
-                "run.planning.delta",
-                "Understanding the question against your tenant catalog and preparing a leadership summary.",
-            )
 
+            # ── STAGE 1: Thinking ─────────────────────────────────────
+            # Emit immediately so the frontend shows the thinking animation
+            # within milliseconds of the question being submitted.
+            self._emit(tenant_id, run_id, "run.thinking", {
+                "stage": "retrieval",
+                "message": "Analyzing your question against the data catalog...",
+            })
+
+            # ── STAGE 2: Retrieval ────────────────────────────────────
             self._emit(tenant_id, run_id, "run.retrieval.started", {"question": question})
             try:
                 retrieved = retrieval_service.plan_and_retrieve(
@@ -137,6 +156,8 @@ class AskOrchestrator:
                 return
             repository.update_run(run_id, retrieval_context=retrieved)
             self._raise_if_cancelled(tenant_id, run_id)
+
+            # Emit planning summary from retrieval results
             self._emit_text_chunks(
                 tenant_id,
                 run_id,
@@ -155,13 +176,33 @@ class AskOrchestrator:
             )
             self._emit(tenant_id, run_id, "run.planning.completed", {"status": "completed"})
 
+            # ── STAGE 3: Code generation (streamed) ───────────────────
+            self._emit(tenant_id, run_id, "run.thinking", {
+                "stage": "codegen",
+                "message": "Generating analysis code...",
+            })
             self._emit(tenant_id, run_id, "run.codegen.started", {})
+
+            # Stream raw JSON tokens to the frontend so the code tab
+            # populates in real-time (like ScalarField's live code preview).
+            accumulated_json = ""
+
+            def on_codegen_chunk(chunk: str) -> None:
+                nonlocal accumulated_json
+                accumulated_json += chunk
+                self._emit(tenant_id, run_id, "run.codegen.delta", {"delta": chunk, "raw": True})
+
             try:
-                response = llm_service.generate_analysis(question, retrieved.get("finalContext") or {})
+                response = llm_service.generate_analysis(
+                    question,
+                    retrieved.get("finalContext") or {},
+                    on_chunk=on_codegen_chunk,
+                )
             except Exception as error:
                 logger.exception("Ask code generation failed", extra={"run_id": run_id, "tenant_id": tenant_id})
                 self._fail_run(tenant_id, run_id, "codegen", str(error))
                 return
+
             repository.update_run(
                 run_id,
                 title=response["title"],
@@ -170,6 +211,9 @@ class AskOrchestrator:
                 artifact_plan=response["artifact_plan"],
             )
             self._raise_if_cancelled(tenant_id, run_id)
+
+            # Emit title + summary as a structured header event BEFORE
+            # execution starts so the user sees the answer forming.
             self._emit(
                 tenant_id,
                 run_id,
@@ -181,11 +225,16 @@ class AskOrchestrator:
                     "artifactPlan": response["artifact_plan"],
                 },
             )
-            self._emit_text_chunks(tenant_id, run_id, "run.codegen.delta", response["python_code"], chunk_size=220)
 
             validate_python_code(response["python_code"])
 
             repository.create_message(tenant_id, thread_id, "assistant", response["assistant_summary"], run_id=run_id)
+
+            # ── STAGE 4: Execution ────────────────────────────────────
+            self._emit(tenant_id, run_id, "run.thinking", {
+                "stage": "execution",
+                "message": "Running analysis...",
+            })
 
             def handle_runner_event(event: dict[str, Any]) -> None:
                 """Normalize local-runner output into persisted Ask artifacts/events."""

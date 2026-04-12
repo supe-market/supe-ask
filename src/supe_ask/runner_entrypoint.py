@@ -69,6 +69,12 @@ class CallbackClient:
     def start_heartbeat(self, stop_event: threading.Event) -> threading.Thread:
         """Start a background heartbeat loop for reconciliation safety."""
         def _loop() -> None:
+            # Fire immediately so ECS cold-start latency doesn't trip the reconciler
+            # before the first interval heartbeat would arrive.
+            try:
+                self._post("heartbeat", {})
+            except Exception:
+                pass
             while not stop_event.wait(settings.runner_callback_heartbeat_seconds):
                 try:
                     self._post("heartbeat", {})
@@ -143,6 +149,10 @@ def main() -> None:
     callback_url = _require_env("CALLBACK_URL")
     callback_token = _require_env("CALLBACK_TOKEN")
     callback_client = CallbackClient(callback_url, callback_token, run_id)
+    # Start heartbeat before downloading the manifest so the reconciler does not
+    # mark this task stale during ECS Fargate cold-start or S3 download latency.
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = callback_client.start_heartbeat(heartbeat_stop)
     try:
         input_s3_uri = _require_env("INPUT_S3_URI")
         bucket, key = _parse_s3_uri(input_s3_uri)
@@ -155,11 +165,11 @@ def main() -> None:
         callback_client.set_tenant_context(tenant_id)
     except Exception as error:
         logger.exception("Ask runner bootstrap failed", extra={"run_id": run_id})
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1.0)
         callback_client.post_failed(str(error), stage="execution_bootstrap")
         raise
 
-    heartbeat_stop = threading.Event()
-    heartbeat_thread = callback_client.start_heartbeat(heartbeat_stop)
     runner = LocalRunner()
     try:
         # The isolated ECS runner reuses the same local execution wrapper so the

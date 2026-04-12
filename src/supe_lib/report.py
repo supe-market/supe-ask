@@ -87,3 +87,78 @@ def emit_log_lines(lines: list[str], title: str = DEFAULT_LOG_TITLE) -> None:
     if not normalized_lines:
         return
     _emit(_artifact_payload("log", title or DEFAULT_LOG_TITLE, {"lines": normalized_lines}))
+
+
+# ── Enhanced report helpers ───────────────────────────────────────
+
+def emit_kpi_card(
+    label: str,
+    current: float | int,
+    previous: float | int | None = None,
+    *,
+    unit: str = "number",
+    title: str = "",
+    benchmark: str = "",
+) -> None:
+    """Emit a rich KPI metric card with optional comparison.
+
+    ``unit`` controls frontend formatting: ``"currency"``, ``"percent"``,
+    or ``"number"`` (default).
+    """
+    from .metrics import percent_delta as _pct_delta
+
+    tone = "neutral"
+    pct_delta = None
+    if previous is not None and previous != 0:
+        pct_delta = _pct_delta(float(current), float(previous))
+        tone = "positive" if pct_delta > 0 else "negative" if pct_delta < 0 else "neutral"
+
+    payload: dict[str, Any] = {
+        "label": label,
+        "value": current,
+        "tone": tone,
+        "unit": unit,
+    }
+    if previous is not None:
+        payload["previous"] = previous
+        payload["percentDelta"] = pct_delta
+    if benchmark:
+        payload["benchmark"] = benchmark
+
+    _emit(_artifact_payload("metric", title or label, payload))
+
+
+def emit_section(title: str, subtitle: str = "") -> None:
+    """Emit a section divider that structures the report visually."""
+    _emit({
+        "type": "artifact",
+        "payload": {
+            "artifact_type": "section",
+            "title": title,
+            "payload": {"title": title, "subtitle": subtitle},
+        },
+    })
+
+
+def emit_summary(text: str, title: str = "Summary") -> None:
+    """Emit a formatted summary block — suitable for executive overviews."""
+    emit_markdown(text, title=title)
+
+
+def fmt_currency(value: float | int, symbol: str = "\u20b9", decimals: int = 0) -> str:
+    """Format a number as currency with Indian-style comma grouping."""
+    if value >= 1_00_00_000:
+        return f"{symbol}{value / 1_00_00_000:,.2f} Cr"
+    if value >= 1_00_000:
+        return f"{symbol}{value / 1_00_000:,.2f} L"
+    return f"{symbol}{value:,.{decimals}f}"
+
+
+def fmt_percent(value: float, decimals: int = 1) -> str:
+    """Format a number as a percentage string."""
+    return f"{value:,.{decimals}f}%"
+
+
+def fmt_number(value: float | int, decimals: int = 0) -> str:
+    """Format a number with comma grouping."""
+    return f"{value:,.{decimals}f}"

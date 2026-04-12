@@ -87,6 +87,9 @@ def _classify_request_error(error: Exception, operation: str) -> LLMProviderErro
     return LLMRequestError(f"Vertex AI request failed during {operation}: {error}")
 
 
+StreamCallback = Callable[[str], None]
+
+
 class LLMProvider(Protocol):
     """Interface for model providers used by Ask."""
 
@@ -94,7 +97,7 @@ class LLMProvider(Protocol):
 
     def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]: ...
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any]) -> dict[str, Any]: ...
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]: ...
 
 
 class NullProvider:
@@ -106,7 +109,7 @@ class NullProvider:
     def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any]) -> dict[str, Any]:
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
 
@@ -223,23 +226,54 @@ class VertexGeminiProvider:
             raise LLMResponseParseError("Gemini semantic resolver returned a non-object JSON payload")
         return payload
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any]) -> dict[str, Any]:
-        """Generate the final Python report code using structured JSON output."""
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
+        """Generate the final Python report code, streaming raw token chunks when possible."""
         client = self._get_client()
         logger.info(
             "Calling Vertex AI code generator",
             extra={"provider": "vertex_gemini", "model": settings.vertex_model_codegen, "location": self._location},
         )
+        config = {
+            "system_instruction": build_codegen_system_prompt(),
+            "temperature": 0,
+            "response_mime_type": "application/json",
+            "response_json_schema": ASK_RESPONSE_JSON_SCHEMA["schema"],
+        }
+
+        # When a streaming callback is provided, use generate_content_stream
+        # so the orchestrator can push token-level deltas to the frontend.
+        if on_chunk is not None:
+            try:
+                accumulated_text = ""
+                for chunk in client.models.generate_content_stream(
+                    model=settings.vertex_model_codegen,
+                    contents=build_codegen_user_prompt(question, final_context),
+                    config=config,
+                ):
+                    chunk_text = getattr(chunk, "text", None) or ""
+                    if chunk_text:
+                        accumulated_text += chunk_text
+                        on_chunk(chunk_text)
+            except Exception as error:
+                logger.exception("Vertex AI codegen stream failed")
+                raise _classify_request_error(error, "code generation") from error
+
+            if not accumulated_text:
+                raise LLMResponseParseError("Gemini code generator returned no parseable response")
+            try:
+                payload = json.loads(accumulated_text)
+            except Exception as error:
+                raise LLMResponseParseError(f"Gemini code generator returned invalid JSON: {error}") from error
+            if not isinstance(payload, dict):
+                raise LLMResponseParseError("Gemini code generator returned a non-object JSON payload")
+            return payload
+
+        # Non-streaming fallback (used by tests and non-SSE callers).
         try:
             response = client.models.generate_content(
                 model=settings.vertex_model_codegen,
                 contents=build_codegen_user_prompt(question, final_context),
-                config={
-                    "system_instruction": build_codegen_system_prompt(),
-                    "temperature": 0,
-                    "response_mime_type": "application/json",
-                    "response_json_schema": ASK_RESPONSE_JSON_SCHEMA["schema"],
-                },
+                config=config,
             )
         except Exception as error:
             logger.exception("Vertex AI codegen request failed")
@@ -282,9 +316,9 @@ class LLMService:
         """Resolve a question into typed business grounding."""
         return self._provider.resolve_question_grounding(question, grounding_context)
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any]) -> dict[str, Any]:
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
         """Generate the final Python report code from the finalized retrieval context."""
-        return self._provider.generate_analysis(question, final_context)
+        return self._provider.generate_analysis(question, final_context, on_chunk=on_chunk)
 
 
 llm_service = LLMService()

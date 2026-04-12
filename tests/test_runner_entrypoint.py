@@ -20,7 +20,9 @@ class RunnerEntrypointTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runner_entrypoint.main()
 
-        post_callback.assert_called_once_with(
+        # The heartbeat fires immediately before the manifest download, so
+        # _post is called for the heartbeat AND the failure callback.
+        post_callback.assert_any_call(
             "failed",
             {
                 "message": "manifest missing",
@@ -42,7 +44,7 @@ class RunnerEntrypointTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runner_entrypoint.main()
 
-        post_callback.assert_called_once_with(
+        post_callback.assert_any_call(
             "failed",
             {
                 "message": "Execution manifest is missing tenantId or pythonCode",
