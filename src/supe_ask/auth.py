@@ -7,6 +7,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 
 from .config import settings
+from .db import db
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,19 @@ class AuthUser:
     user_role: str | None
     tenant_id: str
     raw_token: str
+
+
+def _resolve_internal_tenant_id(raw_tenant_id: Any) -> str | None:
+    tenant_value = str(raw_tenant_id or "").strip()
+    if not tenant_value:
+        return None
+
+    if tenant_value.isdigit():
+        row = db.fetch_one("select id from tenants where id = %s limit 1", [int(tenant_value)])
+        return str(row["id"]) if row else None
+
+    row = db.fetch_one("select id from tenants where tenant_code = %s limit 1", [tenant_value])
+    return str(row["id"]) if row else None
 
 
 def _auth_headers(token: str | None = None) -> dict[str, str]:
@@ -39,7 +53,7 @@ async def verify_session_token(token: str) -> AuthUser | None:
     if data.get("status") != "Success":
         return None
     payload = data.get("responseBody") or {}
-    tenant_id = payload.get("supeTenantId")
+    tenant_id = _resolve_internal_tenant_id(payload.get("supeTenantId"))
     if not tenant_id:
         return None
     return AuthUser(
@@ -65,7 +79,7 @@ async def verify_oauth_code(oauth_code: str) -> tuple[str, AuthUser] | None:
         return None
     payload = data.get("responseBody") or {}
     token = payload.get("accessToken")
-    tenant_id = payload.get("supeTenantId")
+    tenant_id = _resolve_internal_tenant_id(payload.get("supeTenantId"))
     if not token or not tenant_id:
         return None
     return (
@@ -140,4 +154,3 @@ async def require_auth(request: Request, response: Response) -> AuthUser:
     if not _is_session_fresh(request):
         set_auth_cookie(request, response, token)
     return user
-
