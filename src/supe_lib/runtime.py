@@ -133,6 +133,7 @@ def execute_user_code(user_code: str) -> None:
         "__builtins__": _safe_builtins(context),
         "__name__": "__main__",
         "display": context.display,
+        "progress": progress,
     }
     locals_dict = globals_dict
 
