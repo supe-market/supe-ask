@@ -560,24 +560,30 @@ class RetrievalService:
                 continue
             candidate = candidate_map.get(table_name, {})
             matched_columns = set(candidate.get("matchedColumns") or [])
-            candidate_columns = []
+            # Build column list: prioritise matched + semantic-role columns so the
+            # most relevant ones survive any cap, but include ALL catalog columns
+            # so the model never has to guess a name.
+            priority_columns: list[dict[str, Any]] = []
+            remaining_columns: list[dict[str, Any]] = []
             for column in columns_by_table.get(table_name, []):
                 column_name = str(column["column_name"])
+                entry = {
+                    "tableName": table_name,
+                    "columnName": column_name,
+                    "dataType": column.get("data_type"),
+                    "semanticRole": column.get("semantic_role"),
+                    "referencesTable": column.get("references_table"),
+                    "referencesColumn": column.get("references_column"),
+                }
                 if (
                     column_name in matched_columns
                     or column.get("semantic_role") in {"date", "metric", "dimension"}
                     or column_name == row.get("tenant_column")
                 ):
-                    candidate_columns.append(
-                        {
-                            "tableName": table_name,
-                            "columnName": column_name,
-                            "dataType": column.get("data_type"),
-                            "semanticRole": column.get("semantic_role"),
-                            "referencesTable": column.get("references_table"),
-                            "referencesColumn": column.get("references_column"),
-                        }
-                    )
+                    priority_columns.append(entry)
+                else:
+                    remaining_columns.append(entry)
+            candidate_columns = priority_columns + remaining_columns
             expanded.append(
                 {
                     "tableName": table_name,
@@ -591,7 +597,7 @@ class RetrievalService:
                     "matchedScore": candidate.get("score", 0),
                     "matchedColumns": list(candidate.get("matchedColumns") or []),
                     "matchedAliases": list(candidate.get("matchedAliases") or []),
-                    "candidateColumns": candidate_columns[:12],
+                    "candidateColumns": candidate_columns[:40],
                     "relationships": [
                         {
                             "fromTable": relationship.get("from_table"),
