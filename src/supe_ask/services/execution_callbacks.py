@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from ..repository import repository
 from ..security import verify_callback_token
 from .artifacts import artifact_service
-from .run_events import emit_run_event
+from .run_stream import emit_live_run_event
 
 
 class ExecutionCallbackService:
@@ -58,14 +58,14 @@ class ExecutionCallbackService:
 
         if callback_type == "progress":
             if str(payload.get("kind") or "") == "stdout":
-                emit_run_event(
+                emit_live_run_event(
                     tenant_id,
                     run_id,
                     "run.execution.stdout",
                     {"line": str(payload.get("stdoutLine") or payload.get("message") or "")},
                 )
                 return {"success": True}
-            emit_run_event(tenant_id, run_id, "run.execution.progress", {"message": str(payload.get("message") or "")})
+            emit_live_run_event(tenant_id, run_id, "run.execution.progress", {"message": str(payload.get("message") or "")})
             return {"success": True}
 
         if callback_type == "artifact":
@@ -81,13 +81,19 @@ class ExecutionCallbackService:
                 storage=storage,
                 metadata={"source": "ecs_callback"},
             )
-            emit_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact})
+            emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
             return {"success": True}
 
         if callback_type == "completed":
             repository.update_run_execution(run_id, status="completed", runner_completed=True)
             repository.update_run(run_id, status="completed", completed=True)
-            emit_run_event(tenant_id, run_id, "run.completed", {"status": "completed", "summary": payload.get("summary")})
+            emit_live_run_event(
+                tenant_id,
+                run_id,
+                "run.completed",
+                {"status": "completed", "summary": payload.get("summary")},
+                force_flush=True,
+            )
             return {"success": True}
 
         if callback_type == "failed":
@@ -95,7 +101,7 @@ class ExecutionCallbackService:
             stage = str(payload.get("stage") or "execution")
             repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=message)
             repository.update_run(run_id, status="failed", error_message=message, completed=True)
-            emit_run_event(
+            emit_live_run_event(
                 tenant_id,
                 run_id,
                 "run.failed",
@@ -104,6 +110,7 @@ class ExecutionCallbackService:
                     "traceback": payload.get("traceback"),
                     "stage": stage,
                 },
+                force_flush=True,
             )
             return {"success": True}
 

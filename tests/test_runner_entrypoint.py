@@ -14,7 +14,7 @@ class RunnerEntrypointTests(unittest.TestCase):
             "INPUT_S3_URI": "s3://bucket/input.json",
         }
         with patch.dict(os.environ, env, clear=True), patch(
-            "supe_ask.runner_entrypoint.s3_storage.get_json",
+            "supe_ask.services.runner_runtime.s3_storage.get_json",
             side_effect=RuntimeError("manifest missing"),
         ), patch("supe_ask.runner_entrypoint.CallbackClient._post") as post_callback:
             with self.assertRaises(RuntimeError):
@@ -38,7 +38,7 @@ class RunnerEntrypointTests(unittest.TestCase):
             "INPUT_S3_URI": "s3://bucket/input.json",
         }
         with patch.dict(os.environ, env, clear=True), patch(
-            "supe_ask.runner_entrypoint.s3_storage.get_json",
+            "supe_ask.services.runner_runtime.s3_storage.get_json",
             return_value={"tenantId": "12"},
         ), patch("supe_ask.runner_entrypoint.CallbackClient._post") as post_callback:
             with self.assertRaises(RuntimeError):
@@ -61,10 +61,10 @@ class RunnerEntrypointTests(unittest.TestCase):
         }
         fake_thread = MagicMock()
         with patch.dict(os.environ, env, clear=True), patch(
-            "supe_ask.runner_entrypoint.s3_storage.get_json",
+            "supe_ask.services.runner_runtime.s3_storage.get_json",
             return_value={"tenantId": "12", "pythonCode": "print('ok')"},
         ), patch("supe_ask.runner_entrypoint.CallbackClient.start_heartbeat", return_value=fake_thread), patch(
-            "supe_ask.runner_entrypoint.LocalRunner"
+            "supe_ask.runner_entrypoint.PythonSubprocessExecutor"
         ) as runner_cls, patch("supe_ask.runner_entrypoint.CallbackClient._post") as post_callback:
             runner_cls.return_value.run.side_effect = RuntimeError("runtime blew up")
             with self.assertRaises(RuntimeError):

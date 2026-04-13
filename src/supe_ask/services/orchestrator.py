@@ -16,11 +16,10 @@ from typing import Any
 
 from ..auth import AuthUser
 from ..repository import repository
-from .artifacts import artifact_service
 from .llm import LLMProviderError, llm_service
 from .retrieval import retrieval_service
-from .run_events import emit_run_event
-from .runner import ExecutionBootstrapError, active_runner, execute_local_run
+from .run_stream import emit_live_run_event
+from .runner import ExecutionBootstrapError, active_runner
 from .validator import CodeValidationError, validate_python_code
 
 logger = logging.getLogger(__name__)
@@ -39,9 +38,17 @@ class AskOrchestrator:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _emit(self, tenant_id: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        """Persist and broadcast a run event through the shared event bus."""
-        emit_run_event(tenant_id, run_id, event_type, payload)
+    def _emit(
+        self,
+        tenant_id: str,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        force_flush: bool = False,
+    ) -> None:
+        """Broadcast a live run event and update the compact persisted stream state."""
+        emit_live_run_event(tenant_id, run_id, event_type, payload, force_flush=force_flush)
 
     def _emit_text_chunks(
         self,
@@ -138,7 +145,13 @@ class AskOrchestrator:
     def _fail_run(self, tenant_id: str, run_id: str, stage: str, message: str, *, traceback: Any | None = None) -> None:
         """Persist a terminal failure and emit one standardized run event."""
         repository.update_run(run_id, status="failed", error_message=message, completed=True)
-        self._emit(tenant_id, run_id, "run.failed", {"message": message, "stage": stage, "traceback": traceback})
+        self._emit(
+            tenant_id,
+            run_id,
+            "run.failed",
+            {"message": message, "stage": stage, "traceback": traceback},
+            force_flush=True,
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -158,7 +171,7 @@ class AskOrchestrator:
         repository.update_run_execution(run_id, status="cancelled", cancel_requested=True, stop_reason="Run cancelled by user")
         active_runner.cancel(run_id)
         repository.update_run(run_id, status="cancelled", error_message="Run cancelled by user", completed=True)
-        self._emit(tenant_id, run_id, "run.cancelled", {"status": "cancelled"})
+        self._emit(tenant_id, run_id, "run.cancelled", {"status": "cancelled"}, force_flush=True)
 
     # ------------------------------------------------------------------
     # Pipeline
@@ -175,10 +188,16 @@ class AskOrchestrator:
             # ── STAGE 1: Thinking ─────────────────────────────────────
             # Emit immediately so the frontend shows the thinking animation
             # within milliseconds of the question being submitted.
-            self._emit(tenant_id, run_id, "run.thinking", {
-                "stage": "retrieval",
-                "message": "Analyzing your question against the data catalog...",
-            })
+            self._emit(
+                tenant_id,
+                run_id,
+                "run.thinking",
+                {
+                    "stage": "retrieval",
+                    "message": "Analyzing your question against the data catalog...",
+                },
+                force_flush=True,
+            )
 
             # ── STAGE 2: Retrieval ────────────────────────────────────
             self._emit(tenant_id, run_id, "run.retrieval.started", {"question": question})
@@ -215,10 +234,16 @@ class AskOrchestrator:
             self._emit(tenant_id, run_id, "run.planning.completed", {"status": "completed"})
 
             # ── STAGE 3: Code generation (streamed) ───────────────────
-            self._emit(tenant_id, run_id, "run.thinking", {
-                "stage": "codegen",
-                "message": "Generating analysis code...",
-            })
+            self._emit(
+                tenant_id,
+                run_id,
+                "run.thinking",
+                {
+                    "stage": "codegen",
+                    "message": "Generating analysis code...",
+                },
+                force_flush=True,
+            )
             self._emit(tenant_id, run_id, "run.codegen.started", {})
 
             # Stream raw JSON tokens to the frontend so the code tab
@@ -262,6 +287,7 @@ class AskOrchestrator:
                     "pythonCode": response["python_code"],
                     "artifactPlan": response["artifact_plan"],
                 },
+                force_flush=True,
             )
 
             validate_python_code(response["python_code"])
@@ -269,74 +295,31 @@ class AskOrchestrator:
             repository.create_message(tenant_id, thread_id, "assistant", response["assistant_summary"], run_id=run_id)
 
             # ── STAGE 4: Execution ────────────────────────────────────
-            self._emit(tenant_id, run_id, "run.thinking", {
-                "stage": "execution",
-                "message": "Running analysis...",
-            })
+            self._emit(
+                tenant_id,
+                run_id,
+                "run.thinking",
+                {
+                    "stage": "execution",
+                    "message": "Running analysis...",
+                },
+                force_flush=True,
+            )
 
-            def handle_runner_event(event: dict[str, Any]) -> None:
-                """Normalize local-runner output into persisted Ask artifacts/events."""
-                event_type = event.get("type")
-                payload = dict(event.get("payload") or {})
-                if event_type == "progress":
-                    self._emit(tenant_id, run_id, "run.execution.progress", payload)
-                    return
-                if event_type == "stdout":
-                    self._emit(tenant_id, run_id, "run.execution.stdout", payload)
-                    return
-                if event_type == "artifact":
-                    artifact_payload = dict(payload.get("payload") or {})
-                    artifact_type = str(payload.get("artifact_type") or "unknown")
-                    title = str(payload.get("title") or artifact_type.title())
-                    artifact = artifact_service.persist_artifact(
-                        tenant_id,
-                        run_id,
-                        artifact_type,
-                        title,
-                        full_payload=artifact_payload,
-                        ordinal=repository.next_artifact_ordinal(tenant_id, run_id),
-                        metadata={"source": "local_runner"},
-                    )
-                    self._emit(tenant_id, run_id, "run.artifact", {"artifact": artifact})
-                    return
-                if event_type == "error":
-                    message = str(payload.get("message") or "Execution failed")
-                    raise RuntimeError(message)
-
-            if active_runner.name == "ecs":
-                # ECS execution is asynchronous: after launch, the runner takes over
-                # and reports progress back through the signed callback endpoint.
-                launch_result = active_runner.launch(run_id, tenant_id, response["python_code"])
-                self._emit(
-                    tenant_id,
-                    run_id,
-                    "run.execution.started",
-                    {"runner": active_runner.name, "taskArn": launch_result.task_arn},
-                )
-                return
-
-            self._emit(tenant_id, run_id, "run.execution.started", {"runner": active_runner.name})
-            repository.upsert_run_execution(tenant_id, run_id, active_runner.name, "running", metadata={"mode": "sync"})
-            launch_result = execute_local_run(run_id, tenant_id, response["python_code"], handle_runner_event)
-
-            if launch_result.logs:
-                artifact = artifact_service.persist_artifact(
-                    tenant_id,
-                    run_id,
-                    "log",
-                    "Execution log",
-                    full_payload={"lines": launch_result.logs},
-                    ordinal=repository.next_artifact_ordinal(tenant_id, run_id),
-                    metadata={"source": "local_runner"},
-                )
-                self._emit(tenant_id, run_id, "run.artifact", {"artifact": artifact})
-
-            if launch_result.return_code != 0:
-                raise RuntimeError("Runner exited with a non-zero status")
-
-            repository.update_run_execution(run_id, status="completed", runner_completed=True)
-            repository.update_run(run_id, status="completed", completed=True)
-            self._emit(tenant_id, run_id, "run.completed", {"status": "completed"})
+            launch_result = active_runner.launch(run_id, tenant_id, response["python_code"])
+            self._emit(
+                tenant_id,
+                run_id,
+                "run.execution.started",
+                {
+                    "runner": active_runner.name,
+                    "dispatchMode": launch_result.dispatch_mode,
+                    "taskArn": launch_result.task_arn,
+                    "queueMessageId": launch_result.queue_message_id,
+                },
+                force_flush=True,
+            )
+            return
         except RunCancelled:
             return
         except ExecutionBootstrapError as error:

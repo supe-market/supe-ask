@@ -28,10 +28,21 @@ class QueryDfTests(unittest.TestCase):
         mock_connection.set_session.assert_called_once_with(readonly=True, autocommit=True)
         mock_connection.close.assert_called_once()
 
-    def test_query_df_requires_tenant_filter_placeholder(self):
+    @patch("supe_lib.db.pd.read_sql_query")
+    @patch("supe_lib.db.psycopg2.connect")
+    def test_query_df_auto_injects_tenant_filter_when_placeholder_is_missing(self, mock_connect, mock_read_sql_query):
+        mock_connection = MagicMock()
+        mock_connect.return_value = mock_connection
+        mock_read_sql_query.return_value = []
         os.environ["SUPE_ASK_TENANT_ID"] = "42"
-        with self.assertRaisesRegex(ValueError, "tenant_filter"):
-            query_df("select * from orders")
+
+        query_df("select * from orders order by created_at desc")
+
+        executed_sql = mock_read_sql_query.call_args.args[0]
+        executed_params = mock_read_sql_query.call_args.kwargs["params"]
+        self.assertIn("tenant_id = %s", executed_sql)
+        self.assertIn("order by created_at desc", executed_sql.lower())
+        self.assertEqual(executed_params, ["42"])
 
     @patch("supe_lib.db.pd.read_sql_query")
     @patch("supe_lib.db.psycopg2.connect")

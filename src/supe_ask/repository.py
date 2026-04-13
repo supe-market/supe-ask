@@ -18,6 +18,16 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, default=str)
 
 
+def _normalize_run_record(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Ensure run rows always expose a JSON object for stream_state."""
+    if not row:
+        return row
+    normalized = dict(row)
+    stream_state = normalized.get("stream_state")
+    normalized["stream_state"] = dict(stream_state) if isinstance(stream_state, dict) else {}
+    return normalized
+
+
 def _build_search_filter(fields: list[str], terms: list[str]) -> tuple[str, list[str]]:
     """Build a simple case-insensitive LIKE filter across multiple columns."""
     normalized_terms = [term.strip().lower() for term in terms if term.strip()]
@@ -141,21 +151,26 @@ class AskRepository:
         ) or {}
 
     def get_run(self, tenant_id: str, run_id: str) -> dict[str, Any] | None:
-        return db.fetch_one(
-            "select * from ask_runs where tenant_id = %s and id = %s limit 1",
-            [tenant_id, run_id],
+        return _normalize_run_record(
+            db.fetch_one(
+                "select * from ask_runs where tenant_id = %s and id = %s limit 1",
+                [tenant_id, run_id],
+            )
         )
 
     def list_runs(self, tenant_id: str, thread_id: str) -> list[dict[str, Any]]:
-        return db.fetch_all(
-            """
-            select *
-            from ask_runs
-            where tenant_id = %s and thread_id = %s
-            order by created_at asc
-            """,
-            [tenant_id, thread_id],
-        )
+        return [
+            _normalize_run_record(row) or {}
+            for row in db.fetch_all(
+                """
+                select *
+                from ask_runs
+                where tenant_id = %s and thread_id = %s
+                order by created_at asc
+                """,
+                [tenant_id, thread_id],
+            )
+        ]
 
     def update_run(
         self,
@@ -167,6 +182,7 @@ class AskRepository:
         python_code: str | None = None,
         retrieval_context: dict[str, Any] | None = None,
         artifact_plan: dict[str, Any] | None = None,
+        stream_state: dict[str, Any] | None = None,
         error_message: str | None = None,
         completed: bool = False,
     ) -> None:
@@ -191,6 +207,9 @@ class AskRepository:
         if artifact_plan is not None:
             updates.append("artifact_plan = %s::jsonb")
             params.append(_json_dumps(artifact_plan))
+        if stream_state is not None:
+            updates.append("stream_state = %s::jsonb")
+            params.append(_json_dumps(stream_state))
         if error_message is not None:
             updates.append("error_message = %s")
             params.append(error_message)
@@ -198,28 +217,6 @@ class AskRepository:
             updates.append("completed_at = now()")
         params.append(run_id)
         db.execute(f"update ask_runs set {', '.join(updates)} where id = %s", params)
-
-    def append_run_event(self, tenant_id: str, run_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist one run event for later replay over SSE."""
-        return db.execute_returning(
-            """
-            insert into ask_run_events (tenant_id, run_id, event_type, payload)
-            values (%s, %s, %s, %s::jsonb)
-            returning id, run_id, event_type, payload, created_at
-            """,
-            [tenant_id, run_id, event_type, _json_dumps(payload)],
-        ) or {}
-
-    def list_run_events(self, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
-        return db.fetch_all(
-            """
-            select id, run_id, event_type, payload, created_at
-            from ask_run_events
-            where tenant_id = %s and run_id = %s
-            order by id asc
-            """,
-            [tenant_id, run_id],
-        )
 
     def upsert_run_execution(
         self,
@@ -313,7 +310,7 @@ class AskRepository:
         db.execute(f"update ask_run_executions set {', '.join(updates)} where run_id = %s", params)
 
     def list_stale_run_executions(self, stale_seconds: int) -> list[dict[str, Any]]:
-        """Find ECS executions that have stopped sending heartbeats."""
+        """Find active executions that have stopped sending heartbeats."""
         return db.fetch_all(
             """
             select *
@@ -322,6 +319,22 @@ class AskRepository:
               and status in ('launching', 'running')
               and cancel_requested_at is null
               and now() - coalesce(last_heartbeat_at, runner_started_at, created_at) > (%s * interval '1 second')
+            order by updated_at asc
+            """,
+            [stale_seconds],
+        )
+
+    def list_stale_queued_run_executions(self, stale_seconds: int) -> list[dict[str, Any]]:
+        """Find queued codebox jobs that have not been picked up by any worker."""
+        return db.fetch_all(
+            """
+            select *
+            from ask_run_executions
+            where backend = 'ecs'
+              and status = 'queued'
+              and cancel_requested_at is null
+              and coalesce(metadata->>'dispatchMode', '') = 'codebox'
+              and now() - created_at > (%s * interval '1 second')
             order by updated_at asc
             """,
             [stale_seconds],

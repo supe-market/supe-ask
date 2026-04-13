@@ -11,14 +11,17 @@ from queue import Empty
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import AuthUser, clear_auth_cookie, require_auth, set_auth_cookie, verify_oauth_code
+from ..config import settings
 from ..event_bus import event_bus
 from ..repository import repository
 from ..services.execution_callbacks import execution_callback_service
 from ..services.orchestrator import orchestrator
+from ..services.run_stream import normalize_stream_state, run_stream_service
 
 router = APIRouter()
 
@@ -67,6 +70,13 @@ async def delete_cookie(request: Request, response: Response):
     return {"success": True, "message": "Deleted"}
 
 
+@router.get("/api/v1/ask/internal/health")
+async def internal_runner_health():
+    """Lightweight unauthenticated probe used by ECS runner smoke checks."""
+    execution_mode = "codebox" if settings.codebox_queue_url else "task"
+    return {"success": True, "service": settings.app_name, "runnerBackend": "ecs", "executionMode": execution_mode}
+
+
 @router.post("/api/v1/ask/internal/runs/{run_id}/callbacks")
 async def receive_run_callback(
     run_id: str,
@@ -107,17 +117,16 @@ async def delete_thread(thread_id: str, user: AuthUser = Depends(require_auth)):
 
 @router.get("/api/v1/ask/threads/{thread_id}")
 async def get_thread(thread_id: str, user: AuthUser = Depends(require_auth)):
-    """Load a thread together with its messages, runs, events, and artifacts."""
+    """Load a thread together with its messages, runs, and persisted artifacts."""
     thread = repository.get_thread(user.tenant_id, thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
     runs = repository.list_runs(user.tenant_id, thread_id)
     artifacts_by_run: dict[str, list[dict[str, Any]]] = {}
-    events_by_run: dict[str, list[dict[str, Any]]] = {}
     for run in runs:
         run_id = str(run["id"])
+        run["stream_state"] = normalize_stream_state(run.get("stream_state"))
         artifacts_by_run[run_id] = repository.list_artifacts(user.tenant_id, run_id)
-        events_by_run[run_id] = repository.list_run_events(user.tenant_id, run_id)
     return {
         "success": True,
         "data": {
@@ -125,7 +134,6 @@ async def get_thread(thread_id: str, user: AuthUser = Depends(require_auth)):
             "messages": repository.list_messages(user.tenant_id, thread_id),
             "runs": runs,
             "artifactsByRun": artifacts_by_run,
-            "eventsByRun": events_by_run,
         },
     }
 
@@ -162,30 +170,36 @@ async def cancel_run(run_id: str, user: AuthUser = Depends(require_auth)):
 
 @router.get("/api/v1/ask/runs/{run_id}/events")
 async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth)):
-    """Replay historical events, then stream live run events over SSE."""
+    """Emit one synthetic run snapshot, then stream live run events over SSE."""
     run = repository.get_run(user.tenant_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
     subscription = event_bus.subscribe(run_id)
     queue = subscription.queue
-    history = repository.list_run_events(user.tenant_id, run_id)
 
     def event_iterator():
-        # The UI reconnects freely, so the stream always replays persisted history
-        # first and only then listens to the live Redis-backed bus.
-        seen_ids: set[int] = set()
+        seen_ids: set[str] = set()
         try:
-            for event in history:
-                seen_ids.add(int(event["id"]))
-                payload = dict(event["payload"] or {})
-                message = {
-                    "id": event["id"],
-                    "eventType": event["event_type"],
-                    "payload": payload,
-                    "createdAt": event["created_at"].isoformat() if event.get("created_at") else None,
-                }
-                yield f"data: {json.dumps(message)}\n\n"
+            current_run = repository.get_run(user.tenant_id, run_id) or run
+            current_run["stream_state"] = run_stream_service.get_current_stream_state(
+                user.tenant_id,
+                run_id,
+                current_run.get("stream_state"),
+            )
+            snapshot_event = {
+                "id": run_stream_service.next_event_id(),
+                "eventType": "run.snapshot",
+                "payload": jsonable_encoder(
+                    {
+                        "run": current_run,
+                        "artifacts": repository.list_artifacts(user.tenant_id, run_id),
+                    }
+                ),
+                "createdAt": jsonable_encoder(current_run["stream_state"].get("updatedAt") or current_run.get("updated_at")),
+            }
+            seen_ids.add(str(snapshot_event["id"]))
+            yield f"data: {json.dumps(snapshot_event)}\n\n"
 
             terminal_status = {"completed", "failed", "cancelled"}
             while True:
@@ -197,8 +211,8 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
                 except Empty:
                     yield ": ping\n\n"
                     continue
-                event_id = int(event.get("id") or 0)
-                if event_id in seen_ids:
+                event_id = str(event.get("id") or "")
+                if event_id and event_id in seen_ids:
                     continue
                 if event_id:
                     seen_ids.add(event_id)

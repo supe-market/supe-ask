@@ -1,146 +1,18 @@
-"""Execution backends for Ask-generated Python.
-
-`LocalRunner` is used for local development and tests. `EcsRunner` is the
-production-oriented backend that launches an isolated task and lets the control
-plane observe it through signed callbacks.
-"""
+"""ECS execution backend for Ask-generated Python."""
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import select
-import subprocess
-import sys
-import tempfile
-import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from threading import Lock
-from typing import Callable
+from typing import Any
 
-from ..aws_clients import ecs_service, s3_storage
+from ..aws_clients import ecs_service, s3_storage, sqs_service
 from ..config import settings
 from ..repository import repository
 from ..security import generate_callback_token, hash_callback_token
-from .warm_pool import warm_pool
+from .runner_network import build_callback_url
 
-EVENT_PREFIX = "__SUPE_ASK_EVENT__"
-ERROR_PREFIX = "__SUPE_ASK_ERROR__"
 logger = logging.getLogger(__name__)
-
-
-WRAPPER_TEMPLATE = """
-import json
-import traceback
-
-from supe_lib.runtime import execute_user_code
-
-USER_CODE = {code_json}
-
-try:
-    execute_user_code(USER_CODE)
-except Exception as error:
-    payload = {{
-        "message": str(error),
-        "traceback": traceback.format_exc(),
-    }}
-    print("{error_prefix}" + json.dumps(payload), flush=True)
-    raise
-"""
-
-
-class LocalRunner:
-    """Execute generated code inside a local subprocess."""
-
-    name = "local"
-
-    def __init__(self) -> None:
-        self._processes: dict[str, subprocess.Popen] = {}
-        self._lock = Lock()
-
-    def run(self, run_id: str, tenant_id: str, code: str, on_event: Callable[[dict], None]) -> tuple[int, list[str]]:
-        """Run generated Python locally and stream runtime events to `on_event`."""
-        stdout_logs: list[str] = []
-        with tempfile.TemporaryDirectory(prefix=f"supe-ask-{run_id[:8]}-") as temp_dir:
-            wrapper_path = Path(temp_dir) / "runner_wrapper.py"
-            wrapper_path.write_text(
-                WRAPPER_TEMPLATE.format(code_json=json.dumps(code), error_prefix=ERROR_PREFIX),
-                encoding="utf-8",
-            )
-            env = os.environ.copy()
-            project_src = str(Path(__file__).resolve().parents[2])
-            env["PYTHONPATH"] = f"{project_src}:{env.get('PYTHONPATH', '')}".strip(":")
-            env["SUPE_ASK_EVENT_PREFIX"] = EVENT_PREFIX
-            # The local runner talks to the analytics database directly, mirroring
-            # the read-only credentials the isolated ECS runner receives at runtime.
-            env["SUPE_ASK_DB_HOST"] = os.getenv("ASK_DB_HOST", os.getenv("DB_HOST", "localhost"))
-            env["SUPE_ASK_DB_PORT"] = os.getenv("ASK_DB_PORT", os.getenv("DB_PORT", "5432"))
-            env["SUPE_ASK_DB_NAME"] = os.getenv("ASK_DB_NAME", os.getenv("DB_NAME", "supe_analytics"))
-            env["SUPE_ASK_DB_USER"] = os.getenv("ASK_DB_USER", os.getenv("DB_USER", "postgres"))
-            env["SUPE_ASK_DB_PASSWORD"] = os.getenv("ASK_DB_PASSWORD", os.getenv("DB_PASSWORD", "postgres"))
-            env["SUPE_ASK_DB_SSL"] = os.getenv("DB_SSL", "false")
-            env["SUPE_ASK_TENANT_ID"] = str(tenant_id)
-
-            process = subprocess.Popen(
-                [sys.executable, str(wrapper_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-            with self._lock:
-                self._processes[run_id] = process
-            try:
-                started_at = time.monotonic()
-                while True:
-                    if process.poll() is not None and process.stdout and process.stdout.closed:
-                        break
-                    if (time.monotonic() - started_at) > settings.run_timeout_seconds:
-                        process.terminate()
-                        raise TimeoutError("Run exceeded the configured timeout")
-                    if not process.stdout:
-                        break
-                    ready, _, _ = select.select([process.stdout], [], [], 0.5)
-                    if not ready:
-                        continue
-                    line = process.stdout.readline()
-                    if not line and process.poll() is not None:
-                        break
-                    if not line:
-                        continue
-                    line = line.rstrip("\n")
-                    if line.startswith(EVENT_PREFIX):
-                        payload = json.loads(line[len(EVENT_PREFIX) :])
-                        on_event(payload)
-                    elif line.startswith(ERROR_PREFIX):
-                        payload = json.loads(line[len(ERROR_PREFIX) :])
-                        on_event({"type": "error", "payload": payload})
-                    else:
-                        stdout_logs.append(line)
-                        on_event({"type": "stdout", "payload": {"line": line}})
-                stderr_output = process.stderr.read().strip() if process.stderr else ""
-                if stderr_output:
-                    stdout_logs.extend([line for line in stderr_output.splitlines() if line])
-                return_code = process.wait(timeout=settings.run_timeout_seconds)
-                return return_code, stdout_logs
-            finally:
-                if process.stdout:
-                    process.stdout.close()
-                if process.stderr:
-                    process.stderr.close()
-                with self._lock:
-                    self._processes.pop(run_id, None)
-
-    def cancel(self, run_id: str) -> bool:
-        """Terminate an in-flight local subprocess, if one exists."""
-        with self._lock:
-            process = self._processes.get(run_id)
-        if not process:
-            return False
-        process.terminate()
-        return True
 
 
 @dataclass
@@ -152,9 +24,11 @@ class RunnerLaunchResult:
     return_code: int | None = None
     logs: list[str] = field(default_factory=list)
     task_arn: str | None = None
+    dispatch_mode: str = "task"
+    queue_message_id: str | None = None
     callback_token: str | None = None
     input_object_key: str | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ExecutionBootstrapError(RuntimeError):
@@ -167,34 +41,43 @@ class EcsRunner:
     name = "ecs"
 
     def launch(self, run_id: str, tenant_id: str, code: str) -> RunnerLaunchResult:
-        """Upload the manifest, persist execution state, and call ECS `RunTask`."""
+        """Upload the manifest, persist execution state, and dispatch the run."""
+        dispatch_mode = "codebox" if settings.codebox_queue_url else "task"
         repository.upsert_run_execution(
             tenant_id,
             run_id,
             self.name,
             "preparing",
-            metadata={"mode": "async"},
+            metadata={"mode": "async", "dispatchMode": dispatch_mode},
         )
         try:
-            if not settings.ecs_cluster or not settings.ecs_task_definition:
-                raise ExecutionBootstrapError(
-                    "ASK_ECS_CLUSTER and ASK_ECS_TASK_DEFINITION must be configured for the ECS runner backend"
-                )
             if not settings.control_plane_internal_url:
                 raise ExecutionBootstrapError("ASK_CONTROL_PLANE_INTERNAL_URL must be configured for the ECS runner backend")
             if not settings.runner_input_bucket:
                 raise ExecutionBootstrapError("ASK_RUNNER_INPUT_BUCKET must be configured for the ECS runner backend")
-            subnets = [item.strip() for item in settings.ecs_subnets.split(",") if item.strip()]
-            security_groups = [item.strip() for item in settings.ecs_security_groups.split(",") if item.strip()]
-            if not subnets or not security_groups:
-                raise ExecutionBootstrapError(
-                    "ASK_ECS_SUBNETS and ASK_ECS_SECURITY_GROUPS must be configured for the ECS runner backend"
-                )
+            if not settings.runner_artifact_bucket:
+                raise ExecutionBootstrapError("ASK_RUNNER_ARTIFACT_BUCKET must be configured for the ECS runner backend")
+            subnets: list[str] = []
+            security_groups: list[str] = []
+            if dispatch_mode == "task":
+                if not settings.ecs_cluster or not settings.ecs_task_definition:
+                    raise ExecutionBootstrapError(
+                        "ASK_ECS_CLUSTER and ASK_ECS_TASK_DEFINITION must be configured for the ECS runner backend"
+                    )
+                subnets = [item.strip() for item in settings.ecs_subnets.split(",") if item.strip()]
+                security_groups = [item.strip() for item in settings.ecs_security_groups.split(",") if item.strip()]
+                if not subnets or not security_groups:
+                    raise ExecutionBootstrapError(
+                        "ASK_ECS_SUBNETS and ASK_ECS_SECURITY_GROUPS must be configured for the ECS runner backend"
+                    )
+            elif not settings.codebox_queue_url:
+                raise ExecutionBootstrapError("ASK_CODEBOX_QUEUE_URL must be configured for the codebox runner backend")
 
             callback_token = generate_callback_token()
-            callback_url = (
-                settings.control_plane_internal_url.rstrip("/") + f"/api/v1/ask/internal/runs/{run_id}/callbacks"
-            )
+            try:
+                callback_url = build_callback_url(settings.control_plane_internal_url, run_id)
+            except ValueError as error:
+                raise ExecutionBootstrapError(str(error)) from error
             input_object_key = f"ask-runs/{tenant_id}/{run_id}/input.json"
             manifest = {
                 "runId": run_id,
@@ -209,19 +92,48 @@ class EcsRunner:
             s3_storage.put_json(settings.runner_input_bucket, input_object_key, manifest)
             repository.update_run_execution(
                 run_id,
-                status="launching",
+                status="queueing" if dispatch_mode == "codebox" else "launching",
                 input_object_key=input_object_key,
-                metadata={"callbackUrl": callback_url},
+                metadata={"callbackUrl": callback_url, "dispatchMode": dispatch_mode},
             )
             repository.upsert_run_execution(
                 tenant_id,
                 run_id,
                 self.name,
-                "launching",
+                "queueing" if dispatch_mode == "codebox" else "launching",
                 callback_token_hash=hash_callback_token(callback_token),
                 input_object_key=input_object_key,
-                metadata={"callbackUrl": callback_url},
+                metadata={"callbackUrl": callback_url, "dispatchMode": dispatch_mode},
             )
+
+            input_s3_uri = f"s3://{settings.runner_input_bucket}/{input_object_key}"
+            if dispatch_mode == "codebox":
+                logger.info("Queueing Ask codebox job", extra={"run_id": run_id, "tenant_id": tenant_id})
+                response = sqs_service.send_message(
+                    settings.codebox_queue_url,
+                    {
+                        "runId": run_id,
+                        "tenantId": str(tenant_id),
+                        "callbackUrl": callback_url,
+                        "callbackToken": callback_token,
+                        "inputS3Uri": input_s3_uri,
+                    },
+                )
+                message_id = str(response.get("MessageId") or "")
+                repository.update_run_execution(
+                    run_id,
+                    status="queued",
+                    metadata={"queueMessageId": message_id, "dispatchMode": dispatch_mode},
+                )
+                return RunnerLaunchResult(
+                    backend=self.name,
+                    completion_mode="async",
+                    dispatch_mode=dispatch_mode,
+                    queue_message_id=message_id or None,
+                    callback_token=callback_token,
+                    input_object_key=input_object_key,
+                    metadata={"dispatchMode": dispatch_mode, "queueMessageId": message_id},
+                )
 
             overrides = {
                 "containerOverrides": [
@@ -231,7 +143,7 @@ class EcsRunner:
                             {"name": "RUN_ID", "value": run_id},
                             {"name": "CALLBACK_URL", "value": callback_url},
                             {"name": "CALLBACK_TOKEN", "value": callback_token},
-                            {"name": "INPUT_S3_URI", "value": f"s3://{settings.runner_input_bucket}/{input_object_key}"},
+                            {"name": "INPUT_S3_URI", "value": input_s3_uri},
                             {"name": "ASK_RUN_TIMEOUT_SECONDS", "value": str(settings.run_timeout_seconds)},
                             {"name": "ASK_RUNNER_ARTIFACT_BUCKET", "value": settings.runner_artifact_bucket},
                             {"name": "ASK_RUNNER_CALLBACK_HEARTBEAT_SECONDS", "value": str(settings.runner_callback_heartbeat_seconds)},
@@ -247,8 +159,6 @@ class EcsRunner:
                 ]
             }
             logger.info("Launching Ask ECS task", extra={"run_id": run_id, "tenant_id": tenant_id})
-            # Analytics DB credentials are intentionally not placed in the manifest.
-            # ECS should inject them from the task definition / secret store instead.
             response = ecs_service.run_task(
                 cluster=settings.ecs_cluster,
                 taskDefinition=settings.ecs_task_definition,
@@ -270,13 +180,19 @@ class EcsRunner:
             if not tasks:
                 raise ExecutionBootstrapError("ECS task launch returned no tasks")
             task_arn = str(tasks[0].get("taskArn") or "")
-            repository.update_run_execution(run_id, task_arn=task_arn, metadata={"launchResponse": {"taskArn": task_arn}})
+            repository.update_run_execution(
+                run_id,
+                task_arn=task_arn,
+                metadata={"launchResponse": {"taskArn": task_arn}, "dispatchMode": dispatch_mode},
+            )
             return RunnerLaunchResult(
                 backend=self.name,
                 completion_mode="async",
                 task_arn=task_arn,
+                dispatch_mode=dispatch_mode,
                 callback_token=callback_token,
                 input_object_key=input_object_key,
+                metadata={"dispatchMode": dispatch_mode, "taskArn": task_arn},
             )
         except Exception as error:
             logger.exception("Ask ECS bootstrap failed", extra={"run_id": run_id, "tenant_id": tenant_id})
@@ -299,50 +215,4 @@ class EcsRunner:
         return True
 
 
-def execute_local_run(run_id: str, tenant_id: str, code: str, on_event: Callable[[dict], None]) -> RunnerLaunchResult:
-    """Small adapter that gives the local path the same return shape as ECS."""
-    return_code, logs = local_runner.run(run_id, tenant_id, code, on_event)
-    return RunnerLaunchResult(
-        backend=local_runner.name,
-        completion_mode="sync",
-        return_code=return_code,
-        logs=logs,
-    )
-
-
-class WarmPoolRunner:
-    """Execute Ask code on a warm process pool — ScalarField codebox style.
-
-    Pre-forked workers have pandas/numpy/plotly already imported, cutting
-    subprocess startup from ~3-5s to near-zero.
-    """
-
-    name = "warm_pool"
-
-    def __init__(self) -> None:
-        warm_pool.warm_up()
-
-    def run(
-        self,
-        run_id: str,
-        tenant_id: str,
-        code: str,
-        on_event: Callable[[dict], None],
-    ) -> tuple[int, list[str]]:
-        return warm_pool.run(run_id, tenant_id, code, on_event)
-
-    def cancel(self, run_id: str) -> bool:
-        return warm_pool.cancel(run_id)
-
-
-def _build_runner_backend():
-    """Pick the active execution backend from configuration."""
-    if settings.runner_backend == "ecs":
-        return EcsRunner()
-    if settings.runner_backend == "warm_pool":
-        return WarmPoolRunner()
-    return local_runner
-
-
-local_runner = LocalRunner()
-active_runner = _build_runner_backend()
+active_runner = EcsRunner()

@@ -16,7 +16,7 @@ class ExecutionCallbackServiceTests(unittest.TestCase):
         with patch("supe_ask.services.execution_callbacks.repository.get_run_execution", return_value=execution), patch(
             "supe_ask.services.execution_callbacks.repository.get_run", return_value=run
         ), patch("supe_ask.services.execution_callbacks.repository.update_run_execution") as update_execution, patch(
-            "supe_ask.services.execution_callbacks.emit_run_event"
+            "supe_ask.services.execution_callbacks.emit_live_run_event"
         ) as emit_event:
             response = service.handle_callback("run-1", "secret", "progress", 1, {"message": "Working"})
 
@@ -56,7 +56,7 @@ class ExecutionCallbackServiceTests(unittest.TestCase):
             "supe_ask.services.execution_callbacks.repository.get_run", return_value=run
         ), patch("supe_ask.services.execution_callbacks.repository.update_run_execution"), patch(
             "supe_ask.services.execution_callbacks.artifact_service.persist_artifact", return_value=artifact
-        ) as persist_artifact, patch("supe_ask.services.execution_callbacks.emit_run_event") as emit_event:
+        ) as persist_artifact, patch("supe_ask.services.execution_callbacks.emit_live_run_event") as emit_event:
             response = service.handle_callback(
                 "run-1",
                 "secret",
@@ -72,7 +72,7 @@ class ExecutionCallbackServiceTests(unittest.TestCase):
 
         self.assertEqual(response, {"success": True})
         persist_artifact.assert_called_once()
-        emit_event.assert_called_once_with("12", "run-1", "run.artifact", {"artifact": artifact})
+        emit_event.assert_called_once_with("12", "run-1", "run.artifact", {"artifact": artifact}, force_flush=True)
 
     def test_failed_callback_uses_runner_supplied_stage(self):
         service = ExecutionCallbackService()
@@ -83,7 +83,7 @@ class ExecutionCallbackServiceTests(unittest.TestCase):
             "supe_ask.services.execution_callbacks.repository.get_run", return_value=run
         ), patch("supe_ask.services.execution_callbacks.repository.update_run_execution"), patch(
             "supe_ask.services.execution_callbacks.repository.update_run"
-        ), patch("supe_ask.services.execution_callbacks.emit_run_event") as emit_event:
+        ), patch("supe_ask.services.execution_callbacks.emit_live_run_event") as emit_event:
             response = service.handle_callback(
                 "run-1",
                 "secret",
@@ -105,6 +105,7 @@ class ExecutionCallbackServiceTests(unittest.TestCase):
                 "traceback": None,
                 "stage": "execution_bootstrap",
             },
+            force_flush=True,
         )
 
 

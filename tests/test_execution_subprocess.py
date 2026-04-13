@@ -1,10 +1,10 @@
 import unittest
 
-from supe_ask.services.runner import local_runner
+from supe_ask.services.execution_subprocess import PythonSubprocessExecutor
 
 
-class RunnerIntegrationTests(unittest.TestCase):
-    def test_local_runner_emits_runtime_events(self):
+class ExecutionSubprocessTests(unittest.TestCase):
+    def test_executor_emits_runtime_events(self):
         events: list[dict] = []
         code = """
 import pandas as pd
@@ -14,7 +14,7 @@ display(pd.DataFrame([{"region": "South", "sales": 12}]), title="Sales table")
 print("Result: Completed")
 """
 
-        return_code, logs = local_runner.run("test-runner-runtime", "42", code, events.append)
+        return_code, logs = PythonSubprocessExecutor().run("test-runner-runtime", "42", code, events.append)
 
         self.assertEqual(return_code, 0)
         self.assertEqual(logs, [])
