@@ -101,6 +101,7 @@ Hard requirements:
   - import pandas as pd
   - import plotly.express as px
   - import plotly.graph_objects as go
+  - from concurrent.futures import ThreadPoolExecutor
   - from supe_lib.charts import bar_chart, line_chart, pie_chart, waterfall_chart
   - from supe_lib.db import query_df
   - from supe_lib.report import emit_markdown, emit_metric, emit_table, emit_plotly, progress, emit_kpi_card, emit_section, emit_summary, emit_highlights, fmt_currency, fmt_percent, fmt_number
@@ -152,6 +153,14 @@ Hard requirements:
   - params = {{**period_params}}
   - sql = f"... {{period_clause}} ..."
   - df = query_df(sql, params=params, tenant_id_column="alias.tenant_id")
+- When you need 2 or more query_df calls whose inputs do not depend on each other's results, always fetch them in parallel using ThreadPoolExecutor. Collect all futures before emitting any artifacts. This is mandatory — serial queries are the single largest source of slow responses:
+  from concurrent.futures import ThreadPoolExecutor
+  with ThreadPoolExecutor() as pool:
+      fut_a = pool.submit(query_df, sql_a, params=params_a)
+      fut_b = pool.submit(query_df, sql_b, params=params_b, tenant_id_column="alias.tenant_id")
+      df_a = fut_a.result()
+      df_b = fut_b.result()
+  # emit sections and artifacts only after all .result() calls
 - If you do call period_bounds, the first positional argument must be the period label, and any current date must be passed as today=...
 - Never pass a period label such as "mtd" or "qtd" as the today/date argument.
 - Supported comparison periods include pmtd for previous-month-to-date.
