@@ -1,8 +1,4 @@
-"""FastAPI application factory for the supe-ask control plane.
-
-The app is intentionally thin. It runs the SQL migrations, starts the ECS
-execution reconciler, then delegates Ask behavior to the routed services below.
-"""
+"""FastAPI application factory for the supe-ask control plane."""
 
 from __future__ import annotations
 
@@ -16,7 +12,7 @@ from .config import settings
 from .migration_runner import run_migrations
 from .routes.api import router as api_router
 from .services.llm import llm_service
-from .services.reconciler import execution_reconciler
+from .services.runner import active_runner
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +59,14 @@ def create_app() -> FastAPI:
             logger.error("LLM provider validation failed; starting in degraded mode: %s", error)
             app.state.ready = False
             app.state.readiness_reason = f"LLM provider unavailable: {error}"
-        execution_reconciler.start()
+        logger.info("Starting warm process pool")
+        active_runner.warm_up()
 
     @app.on_event("shutdown")
     def shutdown_tasks() -> None:
         app.state.ready = False
         app.state.readiness_reason = "Service is shutting down"
-        execution_reconciler.stop()
+        active_runner.shutdown()
 
     app.include_router(api_router)
     return app

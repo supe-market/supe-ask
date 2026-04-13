@@ -1,16 +1,22 @@
-"""ECS execution backend for Ask-generated Python."""
+"""Warm-pool execution backend for Ask-generated Python.
+
+Code runs in pre-warmed Python subprocesses on the same host as the control
+plane — no ECS tasks, no SQS queues, no S3 manifests required.
+
+Set ``ASK_RUNNER_BACKEND=warm_pool`` (or leave it as the default) to use this
+backend.  Tune pool size with ``ASK_CODEBOX_WARM_POOL_SIZE`` (default 1).
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from threading import Thread
 from typing import Any
 
-from ..aws_clients import ecs_service, s3_storage, sqs_service
+from ..aws_clients import s3_storage
 from ..config import settings
 from ..repository import repository
-from ..security import generate_callback_token, hash_callback_token
-from .runner_network import build_callback_url
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +30,8 @@ class RunnerLaunchResult:
     return_code: int | None = None
     logs: list[str] = field(default_factory=list)
     task_arn: str | None = None
-    dispatch_mode: str = "task"
+    dispatch_mode: str = "warm_pool"
     queue_message_id: str | None = None
-    callback_token: str | None = None
-    input_object_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -35,184 +39,138 @@ class ExecutionBootstrapError(RuntimeError):
     """Raised when execution cannot be handed off to the runner backend."""
 
 
-class EcsRunner:
-    """Launch Ask execution inside an isolated ECS task."""
+class WarmPoolRunner:
+    """Run Ask execution in-process via a pre-warmed Python subprocess pool.
 
-    name = "ecs"
+    ``launch()`` spawns a daemon thread so the orchestrator's pipeline thread
+    returns immediately.  The daemon thread blocks on ``pool.run()``, streams
+    events directly into ``emit_live_run_event``, and writes the terminal run
+    state when done.  No HTTP callbacks, no S3 manifest, no SQS.
+    """
+
+    name = "warm_pool"
+
+    def __init__(self) -> None:
+        from .codebox_pool import WarmProcessPool
+
+        self._pool = WarmProcessPool(
+            pool_size=settings.codebox_warm_pool_size,
+            max_uses=settings.codebox_warm_pool_max_uses,
+            ready_timeout_seconds=settings.codebox_warm_ready_timeout_seconds,
+        )
+
+    def warm_up(self) -> None:
+        """Pre-spawn warm workers in the background so the first run is fast."""
+        self._pool.warm_up(wait=False)
+
+    def shutdown(self) -> None:
+        """Terminate all warm workers on service shutdown."""
+        self._pool.shutdown()
 
     def launch(self, run_id: str, tenant_id: str, code: str) -> RunnerLaunchResult:
-        """Upload the manifest, persist execution state, and dispatch the run."""
-        dispatch_mode = "codebox" if settings.codebox_queue_url else "task"
+        """Dispatch execution to the warm pool on a daemon thread and return immediately."""
         repository.upsert_run_execution(
             tenant_id,
             run_id,
             self.name,
-            "preparing",
-            metadata={"mode": "async", "dispatchMode": dispatch_mode},
+            "running",
+            metadata={"mode": "sync", "dispatchMode": "warm_pool"},
         )
-        try:
-            if not settings.control_plane_internal_url:
-                raise ExecutionBootstrapError("ASK_CONTROL_PLANE_INTERNAL_URL must be configured for the ECS runner backend")
-            if not settings.runner_input_bucket:
-                raise ExecutionBootstrapError("ASK_RUNNER_INPUT_BUCKET must be configured for the ECS runner backend")
-            if not settings.runner_artifact_bucket:
-                raise ExecutionBootstrapError("ASK_RUNNER_ARTIFACT_BUCKET must be configured for the ECS runner backend")
-            subnets: list[str] = []
-            security_groups: list[str] = []
-            if dispatch_mode == "task":
-                if not settings.ecs_cluster or not settings.ecs_task_definition:
-                    raise ExecutionBootstrapError(
-                        "ASK_ECS_CLUSTER and ASK_ECS_TASK_DEFINITION must be configured for the ECS runner backend"
-                    )
-                subnets = [item.strip() for item in settings.ecs_subnets.split(",") if item.strip()]
-                security_groups = [item.strip() for item in settings.ecs_security_groups.split(",") if item.strip()]
-                if not subnets or not security_groups:
-                    raise ExecutionBootstrapError(
-                        "ASK_ECS_SUBNETS and ASK_ECS_SECURITY_GROUPS must be configured for the ECS runner backend"
-                    )
-            elif not settings.codebox_queue_url:
-                raise ExecutionBootstrapError("ASK_CODEBOX_QUEUE_URL must be configured for the codebox runner backend")
-
-            callback_token = generate_callback_token()
-            try:
-                callback_url = build_callback_url(settings.control_plane_internal_url, run_id)
-            except ValueError as error:
-                raise ExecutionBootstrapError(str(error)) from error
-            input_object_key = f"ask-runs/{tenant_id}/{run_id}/input.json"
-            manifest = {
-                "runId": run_id,
-                "tenantId": str(tenant_id),
-                "pythonCode": code,
-                "artifactThresholdBytes": settings.artifact_s3_threshold_bytes,
-                "maxTableRows": settings.max_table_rows,
-            }
-            logger.info("Uploading Ask execution manifest", extra={"run_id": run_id, "tenant_id": tenant_id})
-            # The manifest contains only run input. Writable Ask state stays in the
-            # control plane database and never moves into the runner container.
-            s3_storage.put_json(settings.runner_input_bucket, input_object_key, manifest)
-            repository.update_run_execution(
-                run_id,
-                status="queueing" if dispatch_mode == "codebox" else "launching",
-                input_object_key=input_object_key,
-                metadata={"callbackUrl": callback_url, "dispatchMode": dispatch_mode},
-            )
-            repository.upsert_run_execution(
-                tenant_id,
-                run_id,
-                self.name,
-                "queueing" if dispatch_mode == "codebox" else "launching",
-                callback_token_hash=hash_callback_token(callback_token),
-                input_object_key=input_object_key,
-                metadata={"callbackUrl": callback_url, "dispatchMode": dispatch_mode},
-            )
-
-            input_s3_uri = f"s3://{settings.runner_input_bucket}/{input_object_key}"
-            if dispatch_mode == "codebox":
-                logger.info("Queueing Ask codebox job", extra={"run_id": run_id, "tenant_id": tenant_id})
-                response = sqs_service.send_message(
-                    settings.codebox_queue_url,
-                    {
-                        "runId": run_id,
-                        "tenantId": str(tenant_id),
-                        "callbackUrl": callback_url,
-                        "callbackToken": callback_token,
-                        "inputS3Uri": input_s3_uri,
-                    },
-                )
-                message_id = str(response.get("MessageId") or "")
-                repository.update_run_execution(
-                    run_id,
-                    status="queued",
-                    metadata={"queueMessageId": message_id, "dispatchMode": dispatch_mode},
-                )
-                return RunnerLaunchResult(
-                    backend=self.name,
-                    completion_mode="async",
-                    dispatch_mode=dispatch_mode,
-                    queue_message_id=message_id or None,
-                    callback_token=callback_token,
-                    input_object_key=input_object_key,
-                    metadata={"dispatchMode": dispatch_mode, "queueMessageId": message_id},
-                )
-
-            overrides = {
-                "containerOverrides": [
-                    {
-                        "name": settings.ecs_container_name,
-                        "environment": [
-                            {"name": "RUN_ID", "value": run_id},
-                            {"name": "CALLBACK_URL", "value": callback_url},
-                            {"name": "CALLBACK_TOKEN", "value": callback_token},
-                            {"name": "INPUT_S3_URI", "value": input_s3_uri},
-                            {"name": "ASK_RUN_TIMEOUT_SECONDS", "value": str(settings.run_timeout_seconds)},
-                            {"name": "ASK_RUNNER_ARTIFACT_BUCKET", "value": settings.runner_artifact_bucket},
-                            {"name": "ASK_RUNNER_CALLBACK_HEARTBEAT_SECONDS", "value": str(settings.runner_callback_heartbeat_seconds)},
-                            {"name": "ASK_MAX_TABLE_ROWS", "value": str(settings.max_table_rows)},
-                            {"name": "ASK_ARTIFACT_S3_THRESHOLD_BYTES", "value": str(settings.artifact_s3_threshold_bytes)},
-                            {"name": "AWS_REGION", "value": settings.aws_region},
-                            {"name": "S3_ENDPOINT", "value": settings.s3_endpoint},
-                            {"name": "S3_ACCESS_KEY_ID", "value": settings.s3_access_key_id},
-                            {"name": "S3_SECRET_ACCESS_KEY", "value": settings.s3_secret_access_key},
-                            {"name": "S3_FORCE_PATH_STYLE", "value": "true" if settings.s3_force_path_style else "false"},
-                        ],
-                    }
-                ]
-            }
-            logger.info("Launching Ask ECS task", extra={"run_id": run_id, "tenant_id": tenant_id})
-            response = ecs_service.run_task(
-                cluster=settings.ecs_cluster,
-                taskDefinition=settings.ecs_task_definition,
-                launchType="FARGATE",
-                count=1,
-                networkConfiguration={
-                    "awsvpcConfiguration": {
-                        "subnets": subnets,
-                        "securityGroups": security_groups,
-                        "assignPublicIp": "ENABLED" if settings.ecs_assign_public_ip else "DISABLED",
-                    }
-                },
-                overrides=overrides,
-            )
-            failures = response.get("failures") or []
-            if failures:
-                raise ExecutionBootstrapError(str(failures[0].get("reason") or "ECS task launch failed"))
-            tasks = response.get("tasks") or []
-            if not tasks:
-                raise ExecutionBootstrapError("ECS task launch returned no tasks")
-            task_arn = str(tasks[0].get("taskArn") or "")
-            repository.update_run_execution(
-                run_id,
-                task_arn=task_arn,
-                metadata={"launchResponse": {"taskArn": task_arn}, "dispatchMode": dispatch_mode},
-            )
-            return RunnerLaunchResult(
-                backend=self.name,
-                completion_mode="async",
-                task_arn=task_arn,
-                dispatch_mode=dispatch_mode,
-                callback_token=callback_token,
-                input_object_key=input_object_key,
-                metadata={"dispatchMode": dispatch_mode, "taskArn": task_arn},
-            )
-        except Exception as error:
-            logger.exception("Ask ECS bootstrap failed", extra={"run_id": run_id, "tenant_id": tenant_id})
-            repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=str(error))
-            if isinstance(error, ExecutionBootstrapError):
-                raise
-            raise ExecutionBootstrapError(str(error)) from error
+        Thread(
+            target=self._execute,
+            args=(run_id, tenant_id, code),
+            daemon=True,
+        ).start()
+        return RunnerLaunchResult(
+            backend=self.name,
+            completion_mode="sync",
+            dispatch_mode="warm_pool",
+        )
 
     def cancel(self, run_id: str) -> bool:
-        """Stop a launched ECS task for the given run, if the ARN is known."""
-        execution = repository.get_run_execution(run_id)
-        task_arn = str((execution or {}).get("task_arn") or "")
-        if not task_arn:
-            return False
-        ecs_service.stop_task(
-            cluster=settings.ecs_cluster,
-            task=task_arn,
-            reason="Cancelled by user",
-        )
-        return True
+        """No-op — the pool's timeout mechanism will kill any overrunning subprocess."""
+        return False
+
+    # ------------------------------------------------------------------
+    # Internal execution thread
+    # ------------------------------------------------------------------
+
+    def _execute(self, run_id: str, tenant_id: str, code: str) -> None:
+        from ..artifact_utils import build_preview_payload, should_offload_artifact
+        from .artifacts import artifact_service
+        from .run_stream import emit_live_run_event
+
+        def on_event(event: dict[str, Any]) -> None:
+            event_type = str(event.get("type") or "")
+            payload = dict(event.get("payload") or {})
+
+            if event_type == "progress":
+                emit_live_run_event(
+                    tenant_id, run_id,
+                    "run.execution.progress",
+                    {"message": str(payload.get("message") or "")},
+                )
+            elif event_type == "stdout":
+                emit_live_run_event(
+                    tenant_id, run_id,
+                    "run.execution.stdout",
+                    {"line": str(payload.get("line") or "")},
+                )
+            elif event_type == "artifact":
+                artifact_type = str(payload.get("artifact_type") or "unknown")
+                title = str(payload.get("title") or artifact_type.title())
+                full_payload = dict(payload.get("payload") or {})
+                preview = build_preview_payload(artifact_type, full_payload)
+                storage = None
+                if settings.runner_artifact_bucket and should_offload_artifact(artifact_type, full_payload):
+                    object_key = f"ask-runs/{tenant_id}/{run_id}/artifacts/{artifact_type}.json"
+                    stored = s3_storage.put_json(settings.runner_artifact_bucket, object_key, full_payload)
+                    storage = {
+                        "storageBackend": "s3",
+                        "objectKey": stored.key,
+                        "contentType": stored.content_type,
+                        "byteSize": stored.byte_size,
+                    }
+                artifact = artifact_service.persist_artifact(
+                    tenant_id, run_id, artifact_type, title,
+                    preview_payload=preview,
+                    storage=storage,
+                    metadata={"source": "warm_pool"},
+                )
+                emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
+            elif event_type == "error":
+                message = str((dict(event.get("payload") or {})).get("message") or "Execution error")
+                logger.warning("Warm pool error event", extra={"run_id": run_id, "message": message})
+
+        try:
+            return_code, logs = self._pool.run(run_id, tenant_id, code, on_event)
+
+            if logs:
+                artifact = artifact_service.persist_artifact(
+                    tenant_id, run_id, "log", "Execution log",
+                    preview_payload=build_preview_payload("log", {"lines": logs}),
+                    storage=None,
+                    metadata={"source": "warm_pool"},
+                )
+                emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
+
+            if return_code != 0:
+                msg = "Runner exited with a non-zero status"
+                repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=msg)
+                repository.update_run(run_id, status="failed", error_message=msg, completed=True)
+                emit_live_run_event(tenant_id, run_id, "run.failed", {"message": msg, "stage": "execution"}, force_flush=True)
+                return
+
+            repository.update_run_execution(run_id, status="completed", runner_completed=True)
+            repository.update_run(run_id, status="completed", completed=True)
+            emit_live_run_event(tenant_id, run_id, "run.completed", {"status": "completed"}, force_flush=True)
+
+        except Exception as error:
+            logger.exception("Warm pool execution failed", extra={"run_id": run_id, "tenant_id": tenant_id})
+            message = str(error)
+            repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=message)
+            repository.update_run(run_id, status="failed", error_message=message, completed=True)
+            emit_live_run_event(tenant_id, run_id, "run.failed", {"message": message, "stage": "execution"}, force_flush=True)
 
 
-active_runner = EcsRunner()
+active_runner = WarmPoolRunner()

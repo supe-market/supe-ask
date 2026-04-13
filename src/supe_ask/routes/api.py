@@ -1,8 +1,4 @@
-"""HTTP routes for the supe-ask control plane.
-
-These routes expose the public Ask thread/run API used by the frontend and one
-internal callback endpoint used only by ephemeral execution runners.
-"""
+"""HTTP routes for the supe-ask control plane."""
 
 from __future__ import annotations
 
@@ -10,16 +6,14 @@ import json
 from queue import Empty
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import AuthUser, clear_auth_cookie, require_auth, set_auth_cookie, verify_oauth_code
-from ..config import settings
 from ..event_bus import event_bus
 from ..repository import repository
-from ..services.execution_callbacks import execution_callback_service
 from ..services.orchestrator import orchestrator
 from ..services.run_stream import normalize_stream_state, run_stream_service
 
@@ -36,14 +30,6 @@ class CreateMessageBody(BaseModel):
     """Payload for submitting a new Ask question into a thread."""
 
     question: str = Field(min_length=1, max_length=4000)
-
-
-class InternalRunCallbackBody(BaseModel):
-    """Payload emitted by the isolated runner back to the control plane."""
-
-    type: str = Field(pattern="^(heartbeat|progress|artifact|completed|failed)$")
-    sequence: int = Field(ge=1)
-    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/cookie")
@@ -69,27 +55,6 @@ async def delete_cookie(request: Request, response: Response):
     clear_auth_cookie(request, response)
     return {"success": True, "message": "Deleted"}
 
-
-@router.get("/api/v1/ask/internal/health")
-async def internal_runner_health():
-    """Lightweight unauthenticated probe used by ECS runner smoke checks."""
-    execution_mode = "codebox" if settings.codebox_queue_url else "task"
-    return {"success": True, "service": settings.app_name, "runnerBackend": "ecs", "executionMode": execution_mode}
-
-
-@router.post("/api/v1/ask/internal/runs/{run_id}/callbacks")
-async def receive_run_callback(
-    run_id: str,
-    body: InternalRunCallbackBody,
-    authorization: str | None = Header(default=None),
-):
-    """Accept signed progress/artifact callbacks from an isolated runner task."""
-    token = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    if not token:
-        raise HTTPException(status_code=403, detail="Callback token missing")
-    return execution_callback_service.handle_callback(run_id, token, body.type, body.sequence, body.payload)
 
 
 @router.get("/api/v1/ask/threads")

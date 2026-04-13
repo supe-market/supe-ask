@@ -90,30 +90,20 @@ class Settings:
 
     run_timeout_seconds: int = int(_env("ASK_RUN_TIMEOUT_SECONDS", "90"))
     max_table_rows: int = int(_env("ASK_MAX_TABLE_ROWS", "50"))
-    control_plane_internal_url: str = _env("ASK_CONTROL_PLANE_INTERNAL_URL", "")
-    runner_input_bucket: str = _env("ASK_RUNNER_INPUT_BUCKET", "")
+    # Optional: offload large artifacts to S3 instead of storing inline in the DB.
+    # Leave empty to keep all artifacts in Postgres (fine for most deployments).
     runner_artifact_bucket: str = _env("ASK_RUNNER_ARTIFACT_BUCKET", "")
-    runner_callback_heartbeat_seconds: int = int(_env("ASK_RUNNER_CALLBACK_HEARTBEAT_SECONDS", "10"))
-    runner_reconcile_stale_seconds: int = int(_env("ASK_RUNNER_RECONCILE_STALE_SECONDS", "60"))
     artifact_s3_threshold_bytes: int = int(_env("ASK_ARTIFACT_S3_THRESHOLD_BYTES", "262144"))
-    codebox_queue_url: str = _env("ASK_CODEBOX_QUEUE_URL", "")
-    codebox_poll_wait_seconds: int = int(_env("ASK_CODEBOX_POLL_WAIT_SECONDS", "20"))
-    codebox_visibility_timeout_seconds: int = int(_env("ASK_CODEBOX_VISIBILITY_TIMEOUT_SECONDS", "300"))
-    codebox_queue_stale_seconds: int = int(_env("ASK_CODEBOX_QUEUE_STALE_SECONDS", "300"))
+    # Warm process pool settings
     codebox_warm_pool_size: int = int(_env("ASK_CODEBOX_WARM_POOL_SIZE", "1"))
     codebox_warm_pool_max_uses: int = int(_env("ASK_CODEBOX_WARM_POOL_MAX_USES", "50"))
     codebox_warm_ready_timeout_seconds: int = int(_env("ASK_CODEBOX_WARM_READY_TIMEOUT_SECONDS", "30"))
+    # S3 credentials (only needed if ASK_RUNNER_ARTIFACT_BUCKET is set)
     aws_region: str = _env("AWS_REGION", _env("S3_REGION", ""))
     s3_endpoint: str = _env("S3_ENDPOINT", "")
     s3_access_key_id: str = _env("S3_ACCESS_KEY_ID", "")
     s3_secret_access_key: str = _env("S3_SECRET_ACCESS_KEY", "")
     s3_force_path_style: bool = _env_bool("S3_FORCE_PATH_STYLE", False)
-    ecs_cluster: str = _env("ASK_ECS_CLUSTER", "")
-    ecs_task_definition: str = _env("ASK_ECS_TASK_DEFINITION", "")
-    ecs_subnets: str = _env("ASK_ECS_SUBNETS", "")
-    ecs_security_groups: str = _env("ASK_ECS_SECURITY_GROUPS", "")
-    ecs_container_name: str = _env("ASK_ECS_CONTAINER_NAME", "supe-ask-runner")
-    ecs_assign_public_ip: bool = _env_bool("ASK_ECS_ASSIGN_PUBLIC_IP", False)
 
 
 settings = Settings()
