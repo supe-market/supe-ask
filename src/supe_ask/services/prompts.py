@@ -210,9 +210,11 @@ Hard requirements:
 - Every SQL statement must contain the literal placeholder {{tenant_filter}}.
 - If a table is aliased, call query_df(..., tenant_id_column="alias.tenant_id") so the runtime can expand {{tenant_filter}} safely.
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
+- Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
 - Do not answer a business metric question by merely selecting one pre-aggregated row from a snapshot or summary table unless the user explicitly asked for a stored snapshot metric.
 - Prefer calculating the requested metric from the most granular relevant fact tables available in final_context. Use summary tables only as a fallback or benchmark.
+- Do not query entity_metric_snapshots for business KPI answers. Recalculate metrics from raw fact tables such as sales_orders and sales_order_items.
 - Every executive answer must feel like a dashboard, not a single-number lookup.
 - Before answering, reason through the missing scope choices: period, business scope, comparison baseline, and the first useful drill-downs.
 - If the question is underspecified but still answerable, proceed with sensible defaults instead of blocking. Capture those defaults in artifact_plan.working_assumptions as 1 to 4 concise bullets.
@@ -233,6 +235,9 @@ Hard requirements:
 - Use plotly for charts. fig.show() is supported and will be captured automatically. emit_plotly(...) is also supported.
 - Use progress(...) or print("Progress: ...") for concise execution updates.
 - Print useful Info:/Result:/Warning:/Error: lines for anything worth surfacing in logs.
+- For time filtering, prefer build_period_filter(date_column, period, today=...) instead of calling period_bounds directly.
+- If you do call period_bounds, the first positional argument must be the period label, and any current date must be passed as today=...
+- Never pass a period label such as "mtd" or "qtd" as the today/date argument.
 - Do not use placeholders.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 

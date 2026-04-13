@@ -20,6 +20,9 @@ from .llm import llm_service
 
 EventHandler = Callable[[str, dict[str, Any]], None] | None
 
+DERIVED_SNAPSHOT_TABLES = {"entity_metric_snapshots", "target_progress_snapshots"}
+RAW_FACT_TABLES = {"sales_orders", "sales_order_items", "order_payments"}
+
 
 def _tokenize(text: str) -> list[str]:
     return [token for token in re.findall(r"[a-z0-9_]+", text.lower()) if len(token) > 1]
@@ -113,7 +116,7 @@ class RetrievalService:
         )
 
         catalog_terms = self._catalog_terms(question, semantic_candidates, grounding)
-        candidate_tables = self._search_catalog(tenant_id, question, catalog_terms, graph_snapshot)
+        candidate_tables = self._search_catalog(tenant_id, question, catalog_terms, graph_snapshot, grounding)
         seed_tables = [candidate["tableName"] for candidate in candidate_tables[:2]]
         expanded_tables = self._expand_tables(tenant_id, [candidate["tableName"] for candidate in candidate_tables[:4]], candidate_tables)
         graph_neighborhood = self._expand_graph_neighbors(
@@ -248,6 +251,7 @@ class RetrievalService:
         question: str,
         search_terms: list[str],
         graph_snapshot: dict[str, Any],
+        grounding: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         table_rows = repository.search_catalog_tables(tenant_id, search_terms)
         column_rows = repository.search_catalog_columns(tenant_id, search_terms)
@@ -337,8 +341,56 @@ class RetrievalService:
                     "dimensionHints": candidate.get("dimensionHints") or [],
                 }
             )
+        ranked = self._prefer_fact_tables(question, grounding or {}, ranked)
         ranked.sort(key=lambda item: (item["score"], item["tableName"]), reverse=True)
         return ranked[:8]
+
+    def _prefer_fact_tables(
+        self,
+        question: str,
+        grounding: dict[str, Any],
+        ranked: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        question_lower = question.lower()
+        explicit_snapshot_request = any(
+            token in question_lower
+            for token in (
+                "snapshot",
+                "snapshots",
+                "precalculated",
+                "pre-calculated",
+                "stored kpi",
+                "signal",
+                "signals",
+                "target progress",
+            )
+        )
+        metric_question = bool(grounding.get("matched_metrics")) or str(grounding.get("intent") or "").lower() in {
+            "summary",
+            "analysis",
+            "compare",
+            "trend",
+            "rank",
+        }
+        available_tables = {item["tableName"] for item in ranked}
+        has_raw_facts = bool(available_tables & RAW_FACT_TABLES)
+        if explicit_snapshot_request or not metric_question or not has_raw_facts:
+            return ranked
+
+        adjusted: list[dict[str, Any]] = []
+        for item in ranked:
+            updated = dict(item)
+            reasons = list(updated.get("reasons") or [])
+            table_name = str(updated.get("tableName") or "")
+            if table_name in DERIVED_SNAPSHOT_TABLES:
+                updated["score"] = float(updated.get("score") or 0) - 12
+                reasons.append("derived snapshot deprioritized for recalculated metric analysis")
+            elif table_name in RAW_FACT_TABLES:
+                updated["score"] = float(updated.get("score") or 0) + 6
+                reasons.append("raw fact table preferred for recalculated metric analysis")
+            updated["reasons"] = sorted(set(reasons))[:8]
+            adjusted.append(updated)
+        return adjusted
 
     def _expand_tables(self, tenant_id: str, table_names: list[str], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not table_names:
@@ -571,6 +623,9 @@ class RetrievalService:
                 "tenantFilterToken": "{{tenant_filter}}",
                 "readOnly": True,
                 "preferProvidedJoinPaths": True,
+                "blockedTables": sorted(DERIVED_SNAPSHOT_TABLES),
+                "preferFactTablesForMetrics": True,
+                "preferredFactTables": sorted(RAW_FACT_TABLES),
             },
         }
 

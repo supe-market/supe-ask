@@ -29,6 +29,7 @@ ALLOWED_IMPORTS = {
 BLOCKED_NAMES = {"open", "eval", "exec", "compile", "__import__", "input", "exit", "quit"}
 
 BLOCKED_MODULE_PREFIXES = {"os", "sys", "subprocess", "socket", "requests", "httpx", "pathlib", "shutil"}
+BLOCKED_SQL_TABLES = {"entity_metric_snapshots"}
 
 
 class CodeValidationError(ValueError):
@@ -60,6 +61,17 @@ def validate_python_code(code: str) -> None:
             func = node.func
             if isinstance(func, ast.Name) and func.id in BLOCKED_NAMES:
                 raise CodeValidationError(f"Call to '{func.id}' is not allowed")
+            if isinstance(func, ast.Name) and func.id == "period_bounds" and len(node.args) > 1:
+                raise CodeValidationError(
+                    "Use build_period_filter(...) or call period_bounds(period, today=...) with at most one positional argument"
+                )
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id in BLOCKED_MODULE_PREFIXES:
                 raise CodeValidationError(f"Access to '{node.value.id}.{node.attr}' is not allowed")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            lowered = node.value.lower()
+            for table_name in BLOCKED_SQL_TABLES:
+                if table_name in lowered:
+                    raise CodeValidationError(
+                        f"Querying '{table_name}' is not allowed for Ask-generated business analysis; recalculate from raw fact tables"
+                    )

@@ -19,6 +19,11 @@ class SupeLibHelpersTests(unittest.TestCase):
         self.assertEqual(start_date.isoformat(), "2026-03-27")
         self.assertEqual(end_date.isoformat(), "2026-04-02")
 
+    def test_period_bounds_recovers_from_swapped_generated_arguments(self):
+        start_date, end_date = period_bounds("2026-04-13", today="mtd")
+        self.assertEqual(start_date.isoformat(), "2026-04-01")
+        self.assertEqual(end_date.isoformat(), "2026-04-13")
+
     def test_scope_and_period_filters_are_reusable(self):
         clause, params = build_scope_filter("region", "South")
         self.assertEqual(clause, "region = %(scope_value)s")

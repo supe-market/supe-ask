@@ -292,6 +292,34 @@ class RetrievalServiceTests(unittest.TestCase):
         self.assertEqual(result["finalContext"]["semanticPolicies"]["metricAliases"], semantic_metric_aliases)
         self.assertTrue(any(event_type == "run.retrieval.grounding.completed" for event_type, _ in events))
 
+    def test_prefers_sales_orders_over_entity_metric_snapshots_for_metric_questions(self):
+        service = RetrievalService()
+        ranked = service._prefer_fact_tables(
+            "What is my total secondary revenue MTD?",
+            {"intent": "summary", "matched_metrics": ["revenue"]},
+            [
+                {
+                    "tableName": "entity_metric_snapshots",
+                    "score": 20.0,
+                    "reasons": ["table metadata match"],
+                },
+                {
+                    "tableName": "sales_orders",
+                    "score": 10.0,
+                    "reasons": ["table metadata match"],
+                },
+                {
+                    "tableName": "sales_order_items",
+                    "score": 9.0,
+                    "reasons": ["column match"],
+                },
+            ],
+        )
+
+        ranked.sort(key=lambda item: (item["score"], item["tableName"]), reverse=True)
+        self.assertEqual(ranked[0]["tableName"], "sales_orders")
+        self.assertNotEqual(ranked[0]["tableName"], "entity_metric_snapshots")
+
 
 if __name__ == "__main__":
     unittest.main()
