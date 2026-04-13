@@ -12,6 +12,7 @@ from .report import emit_log_lines, emit_plotly, progress
 
 
 ALLOWED_IMPORT_ROOTS = {
+    "concurrent",
     "datetime",
     "json",
     "math",
