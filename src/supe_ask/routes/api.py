@@ -181,7 +181,7 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
                     continue
                 if event_id:
                     seen_ids.add(event_id)
-                yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps(jsonable_encoder(event))}\n\n"
         finally:
             subscription.close()
 
