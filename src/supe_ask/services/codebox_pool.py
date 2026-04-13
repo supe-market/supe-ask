@@ -11,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Lock, Thread
 from typing import Any, Callable
 
@@ -118,6 +119,7 @@ for _raw in sys.stdin:
 @dataclass
 class WarmWorker:
     process: subprocess.Popen
+    output_queue: Queue = field(default_factory=Queue)
     busy: bool = False
     uses: int = 0
 
@@ -233,7 +235,24 @@ class WarmProcessPool:
                 pass
             detail = ready_line or stderr_output or "timed out waiting for worker imports"
             raise RuntimeError(f"Warm worker failed to become ready: {detail}")
-        return WarmWorker(process=process)
+
+        # Start a persistent reader thread that drains this worker's stdout into a
+        # queue. Using select() directly on process.stdout is unreliable because
+        # Python's buffered I/O can hold lines internally without the OS fd
+        # appearing ready — causing JOB_DONE to be silently buffered and never read.
+        output_queue: Queue = Queue()
+
+        def _stdout_reader(stdout: Any, q: Queue) -> None:
+            try:
+                for line in stdout:
+                    q.put(line)
+            except Exception:
+                pass
+            finally:
+                q.put(None)  # EOF / process died sentinel
+
+        Thread(target=_stdout_reader, args=(process.stdout, output_queue), daemon=True).start()
+        return WarmWorker(process=process, output_queue=output_queue)
 
     def _acquire_worker(self) -> WarmWorker | None:
         with self._lock:
@@ -270,8 +289,8 @@ class WarmProcessPool:
     ) -> tuple[int, list[str]]:
         job = json.dumps({"code": code, "tenant_id": tenant_id})
         process = worker.process
-        if not process.stdin or not process.stdout:
-            raise RuntimeError("Warm worker stdin/stdout not available")
+        if not process.stdin:
+            raise RuntimeError("Warm worker stdin not available")
 
         process.stdin.write(job + "\n")
         process.stdin.flush()
@@ -288,18 +307,18 @@ class WarmProcessPool:
                 except Exception:
                     process.kill()
                 raise TimeoutError(f"Run idle for {idle_seconds:.0f}s with no output — possible hang or infinite loop")
-            ready, _, _ = select.select([process.stdout], [], [], 0.5)
-            if not ready:
+            try:
+                raw = worker.output_queue.get(timeout=0.5)
+            except Empty:
                 if process.poll() is not None:
                     exit_reason = "process_exited"
                     break
                 continue
-            line = process.stdout.readline()
-            if not line:
+            if raw is None:
                 exit_reason = "eof"
                 break
             last_activity_at = time.monotonic()
-            line = line.rstrip("\n")
+            line = raw.rstrip("\n")
             if line == JOB_DONE:
                 exit_reason = "job_done"
                 break
