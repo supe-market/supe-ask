@@ -25,18 +25,44 @@ def _ensure_plotly():
 
 
 def bar_chart(
-    df: pd.DataFrame,
-    x: str,
-    y: str | list[str],
+    df: pd.DataFrame | None = None,
+    x: str | None = None,
+    y: str | list[str] | None = None,
     title: str = "Bar Chart",
     *,
     color: str | list[str] | None = None,
     barmode: str = "group",
+    data_frame: pd.DataFrame | None = None,
+    labels: dict[str, str] | None = None,
+    orientation: str = "v",
     show: bool = True,
 ) -> Any:
     """Build and optionally emit a bar chart from a DataFrame."""
     go = _ensure_plotly()
+    df = data_frame if data_frame is not None else df
+    if df is None or x is None or y is None:
+        raise ValueError("bar_chart requires a DataFrame via df or data_frame")
     fig = go.Figure()
+    axis_labels = labels or {}
+    if orientation == "h" and isinstance(y, str):
+        fig.add_trace(go.Bar(
+            x=df[x],
+            y=df[y],
+            orientation="h",
+            name=axis_labels.get(x) or x.replace("_", " ").title(),
+            marker_color=(color if isinstance(color, str) else (color or SUPE_COLORS))[0],
+        ))
+        fig.update_layout(
+            barmode=barmode,
+            title=title,
+            xaxis_title=axis_labels.get(x) or x.replace("_", " ").title(),
+            yaxis_title=axis_labels.get(y) or y.replace("_", " ").title(),
+        )
+        fig = normalize_plotly_figure(fig, title=title)
+        if show:
+            emit_plotly(fig, title=title)
+        return fig
+
     y_cols = [y] if isinstance(y, str) else list(y)
     colors = [color] if isinstance(color, str) else (color or SUPE_COLORS)
     for i, col in enumerate(y_cols):
@@ -46,7 +72,12 @@ def bar_chart(
             name=col.replace("_", " ").title(),
             marker_color=colors[i % len(colors)],
         ))
-    fig.update_layout(barmode=barmode, title=title)
+    fig.update_layout(
+        barmode=barmode,
+        title=title,
+        xaxis_title=axis_labels.get(x) or x.replace("_", " ").title(),
+        yaxis_title=axis_labels.get(y_cols[0]) or y_cols[0].replace("_", " ").title(),
+    )
     fig = normalize_plotly_figure(fig, title=title)
     if show:
         emit_plotly(fig, title=title)
@@ -54,19 +85,25 @@ def bar_chart(
 
 
 def line_chart(
-    df: pd.DataFrame,
-    x: str,
-    y: str | list[str],
+    df: pd.DataFrame | None = None,
+    x: str | None = None,
+    y: str | list[str] | None = None,
     title: str = "Line Chart",
     *,
     color: str | list[str] | None = None,
+    data_frame: pd.DataFrame | None = None,
+    labels: dict[str, str] | None = None,
     show: bool = True,
 ) -> Any:
     """Build and optionally emit a line chart from a DataFrame."""
     go = _ensure_plotly()
+    df = data_frame if data_frame is not None else df
+    if df is None or x is None or y is None:
+        raise ValueError("line_chart requires a DataFrame via df or data_frame")
     fig = go.Figure()
     y_cols = [y] if isinstance(y, str) else list(y)
     colors = [color] if isinstance(color, str) else (color or SUPE_COLORS)
+    axis_labels = labels or {}
     for i, col in enumerate(y_cols):
         fig.add_trace(go.Scatter(
             x=df[x],
@@ -76,7 +113,11 @@ def line_chart(
             line={"color": colors[i % len(colors)], "width": 2},
             marker={"size": 5},
         ))
-    fig.update_layout(title=title)
+    fig.update_layout(
+        title=title,
+        xaxis_title=axis_labels.get(x) or x.replace("_", " ").title(),
+        yaxis_title=axis_labels.get(y_cols[0]) or y_cols[0].replace("_", " ").title(),
+    )
     fig = normalize_plotly_figure(fig, title=title)
     if show:
         emit_plotly(fig, title=title)

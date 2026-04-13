@@ -90,9 +90,21 @@ def emit_log_lines(lines: list[str], title: str = DEFAULT_LOG_TITLE) -> None:
     _emit(_artifact_payload("log", title or DEFAULT_LOG_TITLE, {"lines": normalized_lines}))
 
 
-def emit_highlights(items: list[dict[str, Any]], title: str = DEFAULT_HIGHLIGHTS_TITLE, *, subtitle: str = "") -> None:
+def emit_highlights(items: list[Any], title: str = DEFAULT_HIGHLIGHTS_TITLE, *, subtitle: str = "") -> None:
     normalized_items: list[dict[str, str]] = []
-    for item in items or []:
+    for index, item in enumerate(items or []):
+        if isinstance(item, str):
+            detail = item.strip()
+            if detail:
+                normalized_items.append(
+                    {
+                        "title": f"Insight {index + 1}",
+                        "detail": detail,
+                        "value": "",
+                        "tone": "neutral",
+                    }
+                )
+            continue
         if not isinstance(item, dict):
             continue
         normalized = {

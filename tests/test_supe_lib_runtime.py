@@ -108,6 +108,27 @@ emit_highlights([
         self.assertEqual(payload["items"][0]["tone"], "neutral")
         self.assertEqual(payload["items"][1]["detail"], "Only detail")
 
+    def test_emit_highlights_accepts_simple_string_items(self):
+        events, plain_lines = capture_runtime_events(
+            """
+from supe_lib.report import emit_highlights
+
+emit_highlights([
+    "Secondary revenue reached ₹12.4L this month-to-date.",
+    "This is 8.2% above the same period last month."
+])
+"""
+        )
+        self.assertEqual(plain_lines, [])
+        highlight_artifacts = [
+            event for event in events if event["type"] == "artifact" and event["payload"]["artifact_type"] == "highlights"
+        ]
+        self.assertEqual(len(highlight_artifacts), 1)
+        items = highlight_artifacts[0]["payload"]["payload"]["items"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["title"], "Insight 1")
+        self.assertEqual(items[0]["detail"], "Secondary revenue reached ₹12.4L this month-to-date.")
+
     @unittest.skipUnless(HAS_PLOTLY, "plotly is not installed in the local test environment")
     def test_fig_show_is_captured_as_plotly_artifact(self):
         events, plain_lines = capture_runtime_events(
@@ -125,6 +146,47 @@ fig.show()
         ]
         self.assertEqual(len(plotly_artifacts), 1)
         self.assertEqual(plotly_artifacts[0]["payload"]["title"], "Coverage")
+
+    @unittest.skipUnless(HAS_PLOTLY, "plotly is not installed in the local test environment")
+    def test_chart_helpers_accept_plotly_express_style_kwargs(self):
+        events, plain_lines = capture_runtime_events(
+            """
+import pandas as pd
+from supe_lib.charts import line_chart, bar_chart
+
+trend_df = pd.DataFrame([
+    {"order_sale_date": "2026-04-01", "daily_revenue": 125000},
+    {"order_sale_date": "2026-04-02", "daily_revenue": 118000},
+])
+dist_df = pd.DataFrame([
+    {"distributor_name": "A", "total_revenue": 200000},
+    {"distributor_name": "B", "total_revenue": 150000},
+])
+
+line_chart(
+    data_frame=trend_df,
+    x="order_sale_date",
+    y="daily_revenue",
+    title="Daily Secondary Revenue (MTD)",
+    labels={"order_sale_date": "Date", "daily_revenue": "Revenue"},
+)
+bar_chart(
+    data_frame=dist_df,
+    x="total_revenue",
+    y="distributor_name",
+    orientation="h",
+    title="Top 10 Distributors by Secondary Revenue",
+    labels={"total_revenue": "Total Revenue", "distributor_name": "Distributor"},
+)
+"""
+        )
+        self.assertEqual(plain_lines, [])
+        plotly_artifacts = [
+            event for event in events if event["type"] == "artifact" and event["payload"]["artifact_type"] == "plotly"
+        ]
+        self.assertEqual(len(plotly_artifacts), 2)
+        self.assertEqual(plotly_artifacts[0]["payload"]["title"], "Daily Secondary Revenue (MTD)")
+        self.assertEqual(plotly_artifacts[1]["payload"]["title"], "Top 10 Distributors by Secondary Revenue")
 
     @unittest.skipUnless(HAS_PLOTLY, "plotly is not installed in the local test environment")
     def test_plotly_payload_is_json_native_for_dates_and_numpy(self):

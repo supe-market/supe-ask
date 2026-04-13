@@ -140,7 +140,7 @@ class WarmPoolRunner:
                 emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
             elif event_type == "error":
                 message = str((dict(event.get("payload") or {})).get("message") or "Execution error")
-                logger.warning("Warm pool error event", extra={"run_id": run_id, "message": message})
+                logger.warning("Warm pool error event", extra={"run_id": run_id, "runner_error": message})
 
         try:
             return_code, logs = self._pool.run(run_id, tenant_id, code, on_event)

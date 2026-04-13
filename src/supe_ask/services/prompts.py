@@ -135,6 +135,10 @@ Hard requirements:
 - The artifact_plan.report_sections field must describe the major answer blocks in display order.
 - When highlights are relevant, declare a highlights artifact in artifact_plan.artifacts and generate python_code that emits it with emit_highlights(...).
 - Final highlight values must come from executed code via the emitted highlights artifact, never from artifact_plan.
+- emit_highlights expects a list of objects with keys title, detail, value, and tone. Do not pass a list of plain strings unless there is no better structure available.
+- Preferred chart helper shapes are:
+  - line_chart(data_frame=df, x="date_col", y="metric_col", title="Trend", labels={{"date_col": "Date", "metric_col": "Revenue"}})
+  - bar_chart(data_frame=df, x="metric_col", y="category_col", orientation="h", title="Ranking", labels={{"metric_col": "Revenue", "category_col": "Distributor"}})
 - The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.
