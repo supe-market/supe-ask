@@ -111,11 +111,8 @@ Hard requirements:
   - from supe_lib.supe import build_scope_filter, build_period_filter, build_kpi_summary
 - Do not use file I/O, network I/O, subprocesses, shell commands, package installation, eval, exec, or input.
 - Always query data through query_df, query_records, or query_scalar — never use raw psycopg2 or sqlalchemy directly.
+- The database is PostgreSQL. Write strictly PostgreSQL-compatible SQL — use PostgreSQL syntax, functions, and casting conventions throughout.
 - Tenant isolation is enforced automatically by the runtime. Write plain SQL without any tenant_id filter — do not add WHERE tenant_id = ... manually.
-- PostgreSQL does not allow SELECT-level column aliases inside a CASE expression in ORDER BY. Never write ORDER BY CASE alias WHEN ... — repeat the full expression instead:
-  -- WRONG:  ORDER BY CASE age_bucket WHEN '0-30 Days' THEN 1 ...
-  -- CORRECT: ORDER BY CASE WHEN CURRENT_DATE - order_sale_date <= 30 THEN 1 WHEN ... ELSE 4 END
-  Alternatively wrap in a subquery or CTE so the alias becomes a real column.
 - If a table is aliased in the query, pass tenant_id_column="alias.tenant_id" to query_df so the runtime can locate the right column:
     df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
