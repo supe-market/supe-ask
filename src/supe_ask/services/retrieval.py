@@ -15,7 +15,6 @@ from typing import Any, Callable
 from ..config import settings
 from ..repository import repository
 from .graph_cache import graph_cache_service
-from .llm import llm_service
 
 
 EventHandler = Callable[[str, dict[str, Any]], None] | None
@@ -31,9 +30,6 @@ def _tokenize(text: str) -> list[str]:
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def _safe_identifier(identifier: str) -> bool:
-    return bool(re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", identifier or ""))
 
 
 class CatalogUnavailableError(RuntimeError):
@@ -99,7 +95,7 @@ class RetrievalService:
         )
 
         grounding = self._enrich_grounding(
-            llm_service.resolve_question_grounding(question, semantic_candidates),
+            self._classify_question_deterministically(question, semantic_candidates),
             semantic_candidates,
         )
         self._emit(
@@ -168,6 +164,158 @@ class RetrievalService:
             "fallbackUsed": bool(grounding.get("fallback_used")),
             "confidence": grounding.get("confidence"),
             "finalContext": final_context,
+        }
+
+    def _detect_time_grain(self, question_lower: str) -> str:
+        if re.search(r"\b(this\s+month|month\s+to\s+date|mtd)\b", question_lower):
+            return "mtd"
+        if re.search(r"\b(this\s+quarter|quarter\s+to\s+date|qtd)\b", question_lower):
+            return "qtd"
+        if re.search(r"\b(this\s+year|year\s+to\s+date|ytd)\b", question_lower):
+            return "ytd"
+        if re.search(r"\blast\s+7\s+days?\b", question_lower):
+            return "last_7_days"
+        if re.search(r"\blast\s+30\s+days?\b", question_lower):
+            return "last_30_days"
+        if re.search(r"\blast\s+90\s+days?\b", question_lower):
+            return "last_90_days"
+        m = re.search(r"\blast\s+(\d+)\s+days?\b", question_lower)
+        if m:
+            return f"last_{m.group(1)}_days"
+        if re.search(r"\b(weekly|this\s+week|last\s+week)\b", question_lower):
+            return "last_7_days"
+        return "mtd"
+
+    def _detect_intent(self, question_lower: str) -> str:
+        if re.search(r"\b(trend|over\s+time|by\s+(day|week|month|date)|daily|weekly|monthly|growth|trajectory)\b", question_lower):
+            return "trend"
+        if re.search(r"\b(top|bottom|rank|ranking|best|worst|highest|lowest|leading|lagging)\b", question_lower):
+            return "rank"
+        if re.search(r"\b(compare|vs\.?|versus|against|difference|gap|vs\b)\b", question_lower):
+            return "compare"
+        if re.search(r"\b(breakdown|split|distribution|segment|by\s+\w+|category|categories)\b", question_lower):
+            return "analysis"
+        return "summary"
+
+    def _classify_question_deterministically(
+        self,
+        question: str,
+        semantic_candidates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deterministic intent classifier — replaces the Gemini grounding LLM call.
+
+        Scores semantic candidates using token overlap and regex pattern matching.
+        No network calls, no latency, identical grounding shape to what the LLM returned.
+        """
+        question_lower = question.lower()
+        question_tokens = set(_tokenize(question))
+
+        time_grain = self._detect_time_grain(question_lower)
+        intent = self._detect_intent(question_lower)
+
+        # --- Score clusters by token overlap ---
+        best_cluster_key = ""
+        best_cluster_score = 0.0
+        for cluster in semantic_candidates.get("clusters") or []:
+            cluster_key = str(cluster.get("cluster_key") or "")
+            overlap = len(question_tokens & set(_tokenize(cluster_key)))
+            if overlap > best_cluster_score:
+                best_cluster_score = float(overlap)
+                best_cluster_key = cluster_key
+
+        # --- Score canonical questions and variants by token overlap ---
+        best_canonical_number = None
+        best_canonical_score = 0.0
+        for row in semantic_candidates.get("canonicalQuestions") or []:
+            cq_text = str(row.get("canonical_question") or "")
+            overlap = len(question_tokens & set(_tokenize(cq_text)))
+            if overlap > best_canonical_score:
+                best_canonical_score = float(overlap)
+                best_canonical_number = row.get("question_number")
+                if not best_cluster_key:
+                    best_cluster_key = str(row.get("cluster_key") or "")
+        for row in semantic_candidates.get("questionVariants") or []:
+            variant_text = str(row.get("variant_text") or "")
+            overlap = len(question_tokens & set(_tokenize(variant_text)))
+            if overlap > best_canonical_score:
+                best_canonical_score = float(overlap)
+                best_canonical_number = row.get("canonical_question_number")
+
+        # --- Match entities ---
+        matched_entities: list[str] = []
+        for entity in semantic_candidates.get("entities") or []:
+            entity_key = str(entity.get("entity_key") or entity.get("name") or "")
+            if question_tokens & set(_tokenize(entity_key)):
+                matched_entities.append(entity_key)
+
+        # --- Match metrics (keys + aliases) ---
+        matched_metrics: list[str] = []
+        seen_metrics: set[str] = set()
+        for metric in semantic_candidates.get("metrics") or []:
+            metric_key = str(metric.get("metric_key") or metric.get("name") or "")
+            if (question_tokens & set(_tokenize(metric_key))) and metric_key not in seen_metrics:
+                matched_metrics.append(metric_key)
+                seen_metrics.add(metric_key)
+        for alias_row in semantic_candidates.get("metricAliases") or []:
+            alias = str(alias_row.get("alias") or "")
+            canonical = str(alias_row.get("metric_key") or alias_row.get("canonical_metric") or alias)
+            if (question_tokens & set(_tokenize(alias))) and canonical not in seen_metrics:
+                matched_metrics.append(canonical)
+                seen_metrics.add(canonical)
+
+        # --- Grouping hints (by X, per X, breakdown by X) ---
+        grouping: list[str] = []
+        for pattern in (
+            r"\bby\s+(\w+(?:\s+\w+)?)",
+            r"\bper\s+(\w+(?:\s+\w+)?)",
+            r"\bbreakdown\s+by\s+(\w+(?:\s+\w+)?)",
+            r"\bgroup(?:ed)?\s+by\s+(\w+(?:\s+\w+)?)",
+        ):
+            for m in re.finditer(pattern, question_lower):
+                grouping.append(m.group(1).strip())
+
+        # --- Filter hints (for X, in region X) ---
+        filters: list[str] = []
+        for pattern in (
+            r"\bfor\s+([\w\s]+?)(?:\s+in\b|\s+by\b|\s+this\b|\s+last\b|$)",
+            r"\bin\s+([\w\s]+?)(?:\s+by\b|\s+for\b|\s+this\b|$)",
+        ):
+            for m in re.finditer(pattern, question_lower):
+                candidate = m.group(1).strip()
+                if len(candidate) > 1 and candidate not in {"the", "a", "an", "my"}:
+                    filters.append(candidate)
+
+        # --- Outputs by intent ---
+        outputs_map = {
+            "trend": ["trend_chart", "trend_table"],
+            "rank": ["ranking_table", "bar_chart"],
+            "compare": ["comparison_table", "bar_chart"],
+            "analysis": ["kpi_cards", "breakdown_table", "bar_chart"],
+            "summary": ["kpi_cards", "trend_chart", "breakdown_table"],
+        }
+        outputs = outputs_map.get(intent, ["table", "summary"])
+
+        total_score = best_cluster_score + best_canonical_score + len(matched_metrics) * 0.5 + len(matched_entities) * 0.3
+        confidence = round(min(0.95, max(0.4, total_score / 8.0)), 3)
+        fallback_used = total_score < 2.0
+
+        return {
+            "reasoning": (
+                f"Deterministic classification: cluster_score={best_cluster_score:.1f}, "
+                f"canonical_score={best_canonical_score:.1f}, metrics={matched_metrics!r}, "
+                f"time_grain={time_grain}, intent={intent}"
+            ),
+            "canonical_question_number": best_canonical_number,
+            "cluster_key": best_cluster_key,
+            "intent": intent,
+            "matched_entities": matched_entities[:6],
+            "matched_metrics": matched_metrics[:8],
+            "matched_time_grain": time_grain,
+            "filters": filters[:4],
+            "grouping": grouping[:4],
+            "outputs": outputs,
+            "confidence": confidence,
+            "fallback_used": fallback_used,
         }
 
     def _enrich_grounding(self, grounding: dict[str, Any], semantic_candidates: dict[str, Any]) -> dict[str, Any]:

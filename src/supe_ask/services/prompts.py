@@ -5,43 +5,6 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 
-SEMANTIC_RESOLUTION_JSON_SCHEMA = {
-    "name": "supe_ask_semantic_resolution",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "reasoning": {"type": "string"},
-            "canonical_question_number": {"type": ["integer", "null"]},
-            "cluster_key": {"type": "string"},
-            "intent": {"type": "string"},
-            "matched_entities": {"type": "array", "items": {"type": "string"}},
-            "matched_metrics": {"type": "array", "items": {"type": "string"}},
-            "matched_time_grain": {"type": "string"},
-            "filters": {"type": "array", "items": {"type": "string"}},
-            "grouping": {"type": "array", "items": {"type": "string"}},
-            "outputs": {"type": "array", "items": {"type": "string"}},
-            "confidence": {"type": "number"},
-            "fallback_used": {"type": "boolean"},
-        },
-        "required": [
-            "reasoning",
-            "canonical_question_number",
-            "cluster_key",
-            "intent",
-            "matched_entities",
-            "matched_metrics",
-            "matched_time_grain",
-            "filters",
-            "grouping",
-            "outputs",
-            "confidence",
-            "fallback_used",
-        ],
-    },
-}
-
 
 ASK_RESPONSE_JSON_SCHEMA = {
     "name": "supe_ask_code_response",
@@ -125,19 +88,6 @@ ASK_RESPONSE_JSON_SCHEMA = {
 }
 
 
-def _grounding_summary(grounding_context: dict[str, Any]) -> str:
-    summary = grounding_context.get("summary") or {}
-    lines = [
-        "Resident semantic catalog summary:",
-        f"- clusters: {summary.get('clusterCount', 0)}",
-        f"- canonical_questions: {summary.get('canonicalQuestionCount', 0)}",
-        f"- variants: {summary.get('variantCount', 0)}",
-        f"- entities: {summary.get('entityCount', 0)}",
-        f"- metrics: {summary.get('metricCount', 0)}",
-    ]
-    return "\n".join(lines)
-
-
 def _json_safe(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -148,39 +98,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
-
-
-def build_semantic_resolution_system_prompt(grounding_context: dict[str, Any]) -> str:
-    return f"""
-You are Supe Ask Semantic Resolver.
-
-Your job is to resolve the user's business question against a resident FMCG semantic catalog.
-
-Return JSON only matching the provided schema.
-
-Rules:
-- Choose the most relevant canonical question family from the provided candidates.
-- Prefer the provided semantic candidates over inventing new entities or metrics.
-- Keep time semantics explicit. If the question is month-oriented and does not specify otherwise, prefer MTD.
-- Resolve business language like billing -> revenue, coverage -> coverage, outstanding -> outstanding, collection -> collection.
-- Use only entity and metric keys present in the provided candidates when possible.
-- Set fallback_used=true only if the candidates were weak and you had to infer beyond exact matches.
-- Confidence must be between 0 and 1.
-
-{_grounding_summary(grounding_context)}
-""".strip()
-
-
-def build_semantic_resolution_user_prompt(question: str, grounding_context: dict[str, Any]) -> str:
-    return f"""
-Question:
-{question}
-
-Semantic candidates:
-{json.dumps(_json_safe(grounding_context), ensure_ascii=True, indent=2)}
-
-Resolve the question into a typed semantic grounding.
-""".strip()
 
 
 def build_codegen_system_prompt() -> str:
@@ -212,9 +129,10 @@ Hard requirements:
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
-- Do not answer a business metric question by merely selecting one pre-aggregated row from a snapshot or summary table unless the user explicitly asked for a stored snapshot metric.
-- Prefer calculating the requested metric from the most granular relevant fact tables available in final_context. Use summary tables only as a fallback or benchmark.
-- Do not query entity_metric_snapshots for business KPI answers. Recalculate metrics from raw fact tables such as sales_orders and sales_order_items.
+- NEVER query entity_metric_snapshots, target_progress_snapshots, or any table whose name ends in _snapshots or _summary for business KPI answers. These tables contain stale pre-aggregated data and will produce wrong results.
+- ALWAYS recalculate business metrics (revenue, billing, collection, outstanding, coverage, achievement) from the raw fact tables: sales_orders, sales_order_items, and order_payments. Aggregating from these tables is required — do not shortcut with snapshot rows.
+- The queryGuardrails.blockedTables list in final_context is an ABSOLUTE block — never reference those tables in any SQL statement, even in a subquery or CTE.
+- If raw fact tables are not in relevantTables, use what is available but note the limitation in working_assumptions. Never fall back to snapshot tables silently.
 - Every executive answer must feel like a dashboard, not a single-number lookup.
 - Before answering, reason through the missing scope choices: period, business scope, comparison baseline, and the first useful drill-downs.
 - If the question is underspecified but still answerable, proceed with sensible defaults instead of blocking. Capture those defaults in artifact_plan.working_assumptions as 1 to 4 concise bullets.

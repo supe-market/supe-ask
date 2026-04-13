@@ -111,3 +111,19 @@ def period_params(period: str, today: date | datetime | str | None = None) -> di
         "period_start": start_date.isoformat(),
         "period_end": end_date.isoformat(),
     }
+
+
+# Re-export build_period_filter so `from supe_lib.time import build_period_filter`
+# works — generated code frequently uses this import path instead of supe_lib.supe.
+def build_period_filter(
+    date_column: str,
+    period: str,
+    today: date | datetime | str | None = None,
+    start_param: str = "period_start",
+    end_param: str = "period_end",
+) -> tuple[str, dict[str, str]]:
+    start_date, end_date = period_bounds(period, today=today)
+    return (
+        f"{date_column} >= %({start_param})s and {date_column} <= %({end_param})s",
+        {start_param: start_date.isoformat(), end_param: end_date.isoformat()},
+    )

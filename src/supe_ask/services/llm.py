@@ -26,11 +26,8 @@ except ImportError:  # pragma: no cover - exercised in environments without the 
 from ..config import settings
 from .prompts import (
     ASK_RESPONSE_JSON_SCHEMA,
-    SEMANTIC_RESOLUTION_JSON_SCHEMA,
     build_codegen_system_prompt,
     build_codegen_user_prompt,
-    build_semantic_resolution_system_prompt,
-    build_semantic_resolution_user_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,8 +92,6 @@ class LLMProvider(Protocol):
 
     def validate(self) -> None: ...
 
-    def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]: ...
-
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]: ...
 
 
@@ -104,9 +99,6 @@ class NullProvider:
     """Provider used when the selected backend is disabled or unsupported."""
 
     def validate(self) -> None:
-        raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
-
-    def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
@@ -187,44 +179,6 @@ class VertexGeminiProvider:
             },
         )
         self._get_client()
-
-    def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]:
-        """Resolve business semantics against the resident semantic catalog."""
-        client = self._get_client()
-        logger.info(
-            "Calling Vertex AI semantic resolver",
-            extra={"provider": "vertex_gemini", "model": settings.vertex_model_retrieval, "location": self._location},
-        )
-        try:
-            response = client.models.generate_content(
-                model=settings.vertex_model_retrieval,
-                contents=build_semantic_resolution_user_prompt(question, grounding_context),
-                config={
-                    "system_instruction": build_semantic_resolution_system_prompt(grounding_context),
-                    "temperature": 0,
-                    "response_mime_type": "application/json",
-                    "response_json_schema": SEMANTIC_RESOLUTION_JSON_SCHEMA["schema"],
-                },
-            )
-        except Exception as error:
-            logger.exception("Vertex AI semantic resolver request failed")
-            raise _classify_request_error(error, "semantic resolution") from error
-
-        parsed = getattr(response, "parsed", None)
-        if parsed is not None:
-            payload = parsed if isinstance(parsed, dict) else _object_to_dict(parsed)
-            if payload:
-                return payload
-        text = getattr(response, "text", None)
-        if not text:
-            raise LLMResponseParseError("Gemini semantic resolver returned no parseable response")
-        try:
-            payload = json.loads(text)
-        except Exception as error:
-            raise LLMResponseParseError(f"Gemini semantic resolver returned invalid JSON: {error}") from error
-        if not isinstance(payload, dict):
-            raise LLMResponseParseError("Gemini semantic resolver returned a non-object JSON payload")
-        return payload
 
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
         """Generate the final Python report code, streaming raw token chunks when possible."""
@@ -311,10 +265,6 @@ class LLMService:
     def validate_provider(self) -> None:
         """Validate that the configured provider is ready before serving traffic."""
         self._provider.validate()
-
-    def resolve_question_grounding(self, question: str, grounding_context: dict[str, Any]) -> dict[str, Any]:
-        """Resolve a question into typed business grounding."""
-        return self._provider.resolve_question_grounding(question, grounding_context)
 
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
         """Generate the final Python report code from the finalized retrieval context."""
