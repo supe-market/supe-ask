@@ -153,14 +153,16 @@ Hard requirements:
   - params = {{**period_params}}
   - sql = f"... {{period_clause}} ..."
   - df = query_df(sql, params=params, tenant_id_column="alias.tenant_id")
-- When you need 2 or more query_df calls whose inputs do not depend on each other's results, always fetch them in parallel using ThreadPoolExecutor. Collect all futures before emitting any artifacts. This is mandatory — serial queries are the single largest source of slow responses:
+- When you need 2 or more query_df calls whose inputs do not depend on each other's results, always fetch them in parallel using ThreadPoolExecutor. Submit all futures first, then emit each section as soon as its own future resolves — do not wait for all queries to finish before emitting anything. This is mandatory — serial queries are the single largest source of slow responses. Pattern:
   from concurrent.futures import ThreadPoolExecutor
   with ThreadPoolExecutor() as pool:
-      fut_a = pool.submit(query_df, sql_a, params=params_a)
-      fut_b = pool.submit(query_df, sql_b, params=params_b, tenant_id_column="alias.tenant_id")
-      df_a = fut_a.result()
-      df_b = fut_b.result()
-  # emit sections and artifacts only after all .result() calls
+      fut_kpi   = pool.submit(query_df, kpi_sql,   params=params_kpi)
+      fut_trend = pool.submit(query_df, trend_sql,  params=params_trend)
+      fut_dist  = pool.submit(query_df, dist_sql,   params=params_dist, tenant_id_column="d.tenant_id")
+      # emit each section as soon as its data is ready — other queries keep running in parallel
+      kpi_df   = fut_kpi.result();   emit_kpi_cards(kpi_df)
+      trend_df = fut_trend.result(); emit_trend_chart(trend_df)
+      dist_df  = fut_dist.result();  emit_dist_chart(dist_df)
 - If you do call period_bounds, the first positional argument must be the period label, and any current date must be passed as today=...
 - Never pass a period label such as "mtd" or "qtd" as the today/date argument.
 - Supported comparison periods include pmtd for previous-month-to-date.
