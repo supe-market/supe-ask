@@ -24,6 +24,7 @@ ALLOWED_IMPORTS = {
     "datetime",
     "json",
     "numpy",
+    "concurrent.futures",
 }
 
 BLOCKED_NAMES = {"open", "eval", "exec", "compile", "__import__", "input", "exit", "quit"}
