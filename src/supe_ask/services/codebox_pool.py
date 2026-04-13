@@ -139,18 +139,31 @@ class WarmProcessPool:
     ) -> tuple[int, list[str]]:
         env = dict(self._env or self._build_env())
         env["SUPE_ASK_TENANT_ID"] = str(tenant_id)
+        saw_output = False
+
+        def tracked_on_event(event: dict[str, Any]) -> None:
+            nonlocal saw_output
+            if isinstance(event, dict) and event.get("type"):
+                saw_output = True
+            on_event(event)
 
         worker = self._acquire_worker()
         if worker is not None:
             try:
-                return self._run_on_worker(worker, run_id, code, tenant_id, on_event)
-            except Exception:
+                return self._run_on_worker(worker, run_id, code, tenant_id, tracked_on_event)
+            except Exception as error:
+                if isinstance(error, TimeoutError) or saw_output:
+                    logger.exception(
+                        "Codebox warm worker failed after execution had already started",
+                        extra={"run_id": run_id},
+                    )
+                    raise
                 logger.exception("Codebox warm worker failed, falling back to a cold subprocess")
             finally:
                 self._release_worker(worker)
 
         logger.info("No idle warm workers available; using a cold subprocess", extra={"run_id": run_id})
-        return self._run_cold(run_id, code, on_event, env)
+        return self._run_cold(run_id, code, tracked_on_event, env)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -219,7 +232,8 @@ class WarmProcessPool:
 
     def _release_worker(self, worker: WarmWorker) -> None:
         with self._lock:
-            if worker.uses >= self._max_uses:
+            should_retire = worker.uses >= self._max_uses or worker.process.poll() is not None
+            if should_retire:
                 try:
                     worker.process.terminate()
                 except Exception:
@@ -253,6 +267,10 @@ class WarmProcessPool:
         while True:
             if (time.monotonic() - started_at) > settings.run_timeout_seconds:
                 process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    process.kill()
                 raise TimeoutError("Run exceeded the configured timeout")
             ready, _, _ = select.select([process.stdout], [], [], 0.5)
             if not ready:
@@ -327,6 +345,10 @@ class WarmProcessPool:
             while True:
                 if (time.monotonic() - started_at) > settings.run_timeout_seconds:
                     process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        process.kill()
                     raise TimeoutError("Run exceeded the configured timeout")
                 if not process.stdout:
                     break
