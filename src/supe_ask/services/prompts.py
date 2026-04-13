@@ -140,6 +140,7 @@ Hard requirements:
 - Preferred chart helper shapes are:
   - line_chart(data_frame=df, x="date_col", y="metric_col", title="Trend", labels={{"date_col": "Date", "metric_col": "Revenue"}})
   - bar_chart(data_frame=df, x="metric_col", y="category_col", orientation="h", title="Ranking", labels={{"metric_col": "Revenue", "category_col": "Distributor"}})
+- IMPORTANT: line_chart, bar_chart, pie_chart, and waterfall_chart auto-emit the chart when called. Never call emit_plotly() on their return value — doing so emits the chart twice. Only use emit_plotly() when building a figure manually with plotly.graph_objects.
 - The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.
