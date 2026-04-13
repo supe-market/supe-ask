@@ -44,7 +44,11 @@ def _validate_statement(statement: str, tenant_id_column: str) -> None:
     if not READ_ONLY_PATTERN.search(statement) or BLOCKED_PATTERN.search(statement) or ";" in statement.rstrip(";"):
         raise ValueError("Only a single read-only SQL statement is allowed")
     if TENANT_FILTER_TOKEN not in statement:
-        raise ValueError("SQL must include the {{tenant_filter}} placeholder")
+        snippet = statement[:200].replace("\n", " ")
+        raise ValueError(
+            f"SQL must include the {{{{tenant_filter}}}} placeholder. "
+            f"Offending query starts with: {snippet!r}"
+        )
     if not TENANT_FILTER_PATTERN.match(tenant_id_column):
         raise ValueError("tenant_id_column contains invalid characters")
 
