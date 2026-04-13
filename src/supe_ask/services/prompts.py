@@ -111,12 +111,10 @@ Hard requirements:
   - from supe_lib.supe import build_scope_filter, build_period_filter, build_kpi_summary
 - Do not use file I/O, network I/O, subprocesses, shell commands, package installation, eval, exec, or input.
 - Always query data through query_df, query_records, or query_scalar — never use raw psycopg2 or sqlalchemy directly.
-- The database is PostgreSQL. Write strictly PostgreSQL-compatible SQL — use PostgreSQL syntax, functions, and casting conventions throughout.
-- SQL parameter style is psycopg2: always use %(name)s placeholders, never :name or ? — e.g. WHERE order_sale_date >= %(start_date)s
-- PostgreSQL does not allow SELECT-level column aliases to appear inside expressions in ORDER BY. Use the ordinal position or repeat the expression:
-  -- WRONG:  ORDER BY CASE WHEN aging_bucket = '0-30 Days' THEN 1 ...
-  -- CORRECT: ORDER BY CASE WHEN order_sale_date >= %(today)s::date - interval '30 days' THEN 1 ... END
-  -- OR:      ORDER BY 1   (positional, when GROUP BY 1 is used)
+- The database is PostgreSQL. Write strictly valid PostgreSQL — correct syntax, functions, casts, and interval arithmetic.
+- SQL parameters: always use psycopg2 %(name)s placeholders. Never use :name, ?, or f-string interpolation for values.
+- Column names: only use columns that appear in the relevantTables schema provided in the context. Never invent or guess column names. If a column you need is not in the schema, note the gap in working_assumptions and work around it.
+- ORDER BY: column aliases defined in SELECT are visible in a bare ORDER BY (ORDER BY alias) but not inside expressions. Never write ORDER BY CASE WHEN alias = ... — repeat the full expression or use a positional index (ORDER BY 1).
 - Tenant isolation is enforced automatically by the runtime. Write plain SQL without any tenant_id filter — do not add WHERE tenant_id = ... manually.
 - If a table is aliased in the query, pass tenant_id_column="alias.tenant_id" to query_df so the runtime can locate the right column:
     df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
