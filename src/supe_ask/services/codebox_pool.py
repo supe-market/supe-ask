@@ -25,6 +25,7 @@ EVENT_PREFIX = "__SUPE_ASK_EVENT__"
 ERROR_PREFIX = "__SUPE_ASK_ERROR__"
 WARM_READY = "__WARM_READY__"
 JOB_DONE = "__JOB_DONE__"
+HEARTBEAT = "__SUPE_HEARTBEAT__"
 
 CAN_FORK = platform.system() == "Linux"
 
@@ -47,6 +48,7 @@ except ImportError as _e:
 EVENT_PREFIX = {EVENT_PREFIX!r}
 ERROR_PREFIX = {ERROR_PREFIX!r}
 JOB_DONE = {JOB_DONE!r}
+HEARTBEAT = {HEARTBEAT!r}
 
 sys.stdout.write("{WARM_READY}\\n")
 sys.stdout.flush()
@@ -83,10 +85,22 @@ for _raw in sys.stdin:
             os._exit(0)
         else:
             os.close(_w_fd)
-            with os.fdopen(_r_fd, "r") as _pipe_in:
-                for _line in _pipe_in:
-                    sys.stdout.write(_line)
-                    sys.stdout.flush()
+            import select as _sel
+            _pipe_in = os.fdopen(_r_fd, "r")
+            try:
+                while True:
+                    _ready, _, _ = _sel.select([_pipe_in], [], [], 30.0)
+                    if _ready:
+                        _fwd = _pipe_in.readline()
+                        if not _fwd:
+                            break
+                        sys.stdout.write(_fwd)
+                        sys.stdout.flush()
+                    else:
+                        sys.stdout.write(HEARTBEAT + "\\n")
+                        sys.stdout.flush()
+            finally:
+                _pipe_in.close()
             os.waitpid(_child_pid, 0)
     else:
         try:
@@ -289,7 +303,9 @@ class WarmProcessPool:
             if line == JOB_DONE:
                 exit_reason = "job_done"
                 break
-            if line.startswith(EVENT_PREFIX):
+            elif line == HEARTBEAT:
+                pass  # idle timer already reset above; keep waiting
+            elif line.startswith(EVENT_PREFIX):
                 on_event(json.loads(line[len(EVENT_PREFIX):]))
             elif line.startswith(ERROR_PREFIX):
                 on_event({"type": "error", "payload": json.loads(line[len(ERROR_PREFIX):])})
