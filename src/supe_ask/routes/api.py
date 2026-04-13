@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from queue import Empty
 from typing import Any
 
@@ -16,6 +17,8 @@ from ..event_bus import event_bus
 from ..repository import repository
 from ..services.orchestrator import orchestrator
 from ..services.run_stream import normalize_stream_state, run_stream_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -169,7 +172,7 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
             current_run = repository.get_run(user.tenant_id, run_id) or run
             snapshot_event = build_snapshot_event(current_run)
             seen_ids.add(str(snapshot_event["id"]))
-            yield f"data: {json.dumps(snapshot_event)}\n\n"
+            yield f"data: {json.dumps(jsonable_encoder(snapshot_event))}\n\n"
 
             terminal_snapshot_sent = current_run.get("status") in terminal_status
             while True:
@@ -182,7 +185,7 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
                             break
                         terminal_snapshot = build_snapshot_event(current)
                         seen_ids.add(str(terminal_snapshot["id"]))
-                        yield f"data: {json.dumps(terminal_snapshot)}\n\n"
+                        yield f"data: {json.dumps(jsonable_encoder(terminal_snapshot))}\n\n"
                         terminal_snapshot_sent = True
                         continue
                     yield ": ping\n\n"
@@ -193,6 +196,9 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
                 if event_id:
                     seen_ids.add(event_id)
                 yield f"data: {json.dumps(jsonable_encoder(event))}\n\n"
+        except Exception:
+            logger.exception("SSE generator error", extra={"run_id": run_id})
+            raise
         finally:
             subscription.close()
 
