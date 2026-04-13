@@ -263,25 +263,31 @@ class WarmProcessPool:
         process.stdin.flush()
 
         stdout_logs: list[str] = []
-        started_at = time.monotonic()
+        last_activity_at = time.monotonic()
+        exit_reason = "eof"
         while True:
-            if (time.monotonic() - started_at) > settings.run_timeout_seconds:
+            idle_seconds = time.monotonic() - last_activity_at
+            if idle_seconds > settings.run_timeout_seconds:
                 process.terminate()
                 try:
                     process.wait(timeout=5)
                 except Exception:
                     process.kill()
-                raise TimeoutError("Run exceeded the configured timeout")
+                raise TimeoutError(f"Run idle for {idle_seconds:.0f}s with no output — possible hang or infinite loop")
             ready, _, _ = select.select([process.stdout], [], [], 0.5)
             if not ready:
                 if process.poll() is not None:
+                    exit_reason = "process_exited"
                     break
                 continue
             line = process.stdout.readline()
             if not line:
+                exit_reason = "eof"
                 break
+            last_activity_at = time.monotonic()
             line = line.rstrip("\n")
             if line == JOB_DONE:
+                exit_reason = "job_done"
                 break
             if line.startswith(EVENT_PREFIX):
                 on_event(json.loads(line[len(EVENT_PREFIX):]))
@@ -290,6 +296,7 @@ class WarmProcessPool:
             else:
                 stdout_logs.append(line)
                 on_event({"type": "stdout", "payload": {"line": line}})
+        logger.info("Warm worker loop exited", extra={"run_id": run_id, "exit_reason": exit_reason})
         return 0, stdout_logs
 
     def _run_cold(
@@ -340,16 +347,17 @@ class WarmProcessPool:
         on_event: Callable[[dict[str, Any]], None],
     ) -> tuple[int, list[str]]:
         stdout_logs: list[str] = []
-        started_at = time.monotonic()
+        last_activity_at = time.monotonic()
         try:
             while True:
-                if (time.monotonic() - started_at) > settings.run_timeout_seconds:
+                idle_seconds = time.monotonic() - last_activity_at
+                if idle_seconds > settings.run_timeout_seconds:
                     process.terminate()
                     try:
                         process.wait(timeout=5)
                     except Exception:
                         process.kill()
-                    raise TimeoutError("Run exceeded the configured timeout")
+                    raise TimeoutError(f"Run idle for {idle_seconds:.0f}s with no output — possible hang or infinite loop")
                 if not process.stdout:
                     break
                 ready, _, _ = select.select([process.stdout], [], [], 0.5)
@@ -362,6 +370,7 @@ class WarmProcessPool:
                     break
                 if not line:
                     continue
+                last_activity_at = time.monotonic()
                 line = line.rstrip("\n")
                 if line.startswith(EVENT_PREFIX):
                     on_event(json.loads(line[len(EVENT_PREFIX):]))
