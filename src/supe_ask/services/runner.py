@@ -100,6 +100,15 @@ class WarmPoolRunner:
         from .artifacts import artifact_service
         from .run_stream import emit_live_run_event
 
+        runtime_errors: list[tuple[str, str]] = []
+
+        def summarize_runtime_error(message: str, traceback_text: str) -> str:
+            for source in (traceback_text, message):
+                lines = [line.strip() for line in str(source or "").splitlines() if line.strip()]
+                if lines:
+                    return lines[-1]
+            return "Execution error"
+
         def on_event(event: dict[str, Any]) -> None:
             event_type = str(event.get("type") or "")
             payload = dict(event.get("payload") or {})
@@ -139,11 +148,20 @@ class WarmPoolRunner:
                 )
                 emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
             elif event_type == "error":
-                message = str((dict(event.get("payload") or {})).get("message") or "Execution error")
-                logger.warning("Warm pool error event", extra={"run_id": run_id, "runner_error": message})
+                message = str(payload.get("message") or "Execution error")
+                traceback_text = str(payload.get("traceback") or "").strip()
+                summary = summarize_runtime_error(message, traceback_text)
+                runtime_errors.append((summary, traceback_text or message))
+                logger.warning("Warm pool error event", extra={"run_id": run_id, "runner_error": summary})
 
         try:
             return_code, logs = self._pool.run(run_id, tenant_id, code, on_event)
+
+            if runtime_errors:
+                for summary, detail in runtime_errors:
+                    logs.extend(
+                        [line for line in [f"Error: {summary}", detail] for line in str(line).splitlines() if line.strip()]
+                    )
 
             if logs:
                 artifact = artifact_service.persist_artifact(
@@ -153,6 +171,13 @@ class WarmPoolRunner:
                     metadata={"source": "warm_pool"},
                 )
                 emit_live_run_event(tenant_id, run_id, "run.artifact", {"artifact": artifact}, force_flush=True)
+
+            if runtime_errors:
+                msg = runtime_errors[-1][0]
+                repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=msg)
+                repository.update_run(run_id, status="failed", error_message=msg, completed=True)
+                emit_live_run_event(tenant_id, run_id, "run.failed", {"message": msg, "stage": "execution"}, force_flush=True)
+                return
 
             if return_code != 0:
                 msg = "Runner exited with a non-zero status"
