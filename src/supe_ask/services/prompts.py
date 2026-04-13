@@ -32,20 +32,6 @@ ASK_RESPONSE_JSON_SCHEMA = {
                             "required": ["title", "subtitle"],
                         },
                     },
-                    "key_highlights": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "title": {"type": "string"},
-                                "detail": {"type": "string"},
-                                "value": {"type": "string"},
-                                "tone": {"type": "string"},
-                            },
-                            "required": ["title", "detail", "value", "tone"],
-                        },
-                    },
                     "working_assumptions": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -71,7 +57,7 @@ ASK_RESPONSE_JSON_SCHEMA = {
                         },
                     }
                 },
-                "required": ["report_sections", "key_highlights", "suggested_next_questions", "artifacts"],
+                "required": ["report_sections", "suggested_next_questions", "artifacts"],
             },
             "follow_up_needed": {"type": "boolean"},
             "follow_up_question": {"type": "string"},
@@ -117,7 +103,7 @@ Hard requirements:
   - import plotly.graph_objects as go
   - from supe_lib.charts import bar_chart, line_chart, pie_chart, waterfall_chart
   - from supe_lib.db import query_df
-  - from supe_lib.report import emit_markdown, emit_metric, emit_table, emit_plotly, progress, emit_kpi_card, emit_section, emit_summary, fmt_currency, fmt_percent, fmt_number
+  - from supe_lib.report import emit_markdown, emit_metric, emit_table, emit_plotly, progress, emit_kpi_card, emit_section, emit_summary, emit_highlights, fmt_currency, fmt_percent, fmt_number
   - from supe_lib.display import display
   - from supe_lib.metrics import safe_percent, percent_delta, growth_rate
   - from supe_lib.time import period_bounds
@@ -140,13 +126,15 @@ Hard requirements:
 - Only set follow_up_needed=true when the analysis is genuinely blocked by a critical ambiguity or missing dataset.
 - For KPI-style questions, generate:
   - 3 to 6 KPI cards using emit_kpi_card or emit_metric
+  - 1 highlights artifact using emit_highlights(...) after the metric values are computed
   - at least 1 chart (trend, distribution, ranking, or waterfall) when there are enough rows
   - at least 1 supporting table or ranking cut
   - related analysis around likely follow-up topics such as trend, contributor breakdown, concentration, and exceptions
 - Use emit_section to structure the report into visible blocks such as overview, trend, contributor breakdown, and risks/opportunities.
 - Prepare a leadership-console answer shape, not a generic chatbot response.
 - The artifact_plan.report_sections field must describe the major answer blocks in display order.
-- The artifact_plan.key_highlights field must contain concise ranked business callouts with concrete business-facing values or impact strings. Never use implementation placeholders such as "calculated in script", "computed at runtime", "from SQL", or "from query".
+- When highlights are relevant, declare a highlights artifact in artifact_plan.artifacts and generate python_code that emits it with emit_highlights(...).
+- Final highlight values must come from executed code via the emitted highlights artifact, never from artifact_plan.
 - The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.

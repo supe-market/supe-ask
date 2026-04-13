@@ -62,6 +62,52 @@ display(pd.Series([10, 20], name="sales"))
         self.assertEqual(len(table_artifacts), 2)
         self.assertEqual(table_artifacts[0]["payload"]["title"], "Region table")
 
+    def test_emit_highlights_is_captured_as_highlights_artifact(self):
+        events, plain_lines = capture_runtime_events(
+            """
+from supe_lib.report import emit_highlights
+
+emit_highlights([
+    {"title": "MTD Revenue", "detail": "Month-to-date secondary revenue", "value": "₹12.4L", "tone": "positive"},
+    {"title": "Top Distributor", "detail": "Largest contributor this month", "value": "Sharma Distributors", "tone": "positive"},
+], subtitle="What needs attention")
+"""
+        )
+        self.assertEqual(plain_lines, [])
+        highlight_artifacts = [
+            event for event in events if event["type"] == "artifact" and event["payload"]["artifact_type"] == "highlights"
+        ]
+        self.assertEqual(len(highlight_artifacts), 1)
+        payload = highlight_artifacts[0]["payload"]["payload"]
+        self.assertEqual(highlight_artifacts[0]["payload"]["title"], "Key Highlights")
+        self.assertEqual(payload["subtitle"], "What needs attention")
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(payload["items"][0]["value"], "₹12.4L")
+
+    def test_emit_highlights_drops_malformed_rows_and_normalizes_values(self):
+        events, plain_lines = capture_runtime_events(
+            """
+from supe_lib.report import emit_highlights
+
+emit_highlights([
+    None,
+    {"title": "MTD Revenue", "detail": "Month-to-date revenue", "value": 1240000, "tone": None},
+    {"detail": "Only detail", "value": "", "tone": "warning"},
+], title="Executive Highlights")
+"""
+        )
+        self.assertEqual(plain_lines, [])
+        highlight_artifacts = [
+            event for event in events if event["type"] == "artifact" and event["payload"]["artifact_type"] == "highlights"
+        ]
+        self.assertEqual(len(highlight_artifacts), 1)
+        payload = highlight_artifacts[0]["payload"]["payload"]
+        self.assertEqual(highlight_artifacts[0]["payload"]["title"], "Executive Highlights")
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(payload["items"][0]["value"], "1240000")
+        self.assertEqual(payload["items"][0]["tone"], "neutral")
+        self.assertEqual(payload["items"][1]["detail"], "Only detail")
+
     @unittest.skipUnless(HAS_PLOTLY, "plotly is not installed in the local test environment")
     def test_fig_show_is_captured_as_plotly_artifact(self):
         events, plain_lines = capture_runtime_events(

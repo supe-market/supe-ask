@@ -3,6 +3,7 @@ from .db import query_df, query_records, query_scalar
 from .display import display
 from .metrics import growth_rate, percent_delta, safe_percent, share_of_total
 from .report import (
+    emit_highlights,
     emit_kpi_card,
     emit_log_lines,
     emit_markdown,
@@ -25,6 +26,7 @@ __all__ = [
     "build_period_filter",
     "build_scope_filter",
     "display",
+    "emit_highlights",
     "emit_kpi_card",
     "emit_log_lines",
     "emit_markdown",

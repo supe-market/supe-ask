@@ -145,14 +145,15 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
 
     def event_iterator():
         seen_ids: set[str] = set()
-        try:
-            current_run = repository.get_run(user.tenant_id, run_id) or run
+        terminal_status = {"completed", "failed", "cancelled"}
+
+        def build_snapshot_event(current_run: dict[str, Any]) -> dict[str, Any]:
             current_run["stream_state"] = run_stream_service.get_current_stream_state(
                 user.tenant_id,
                 run_id,
                 current_run.get("stream_state"),
             )
-            snapshot_event = {
+            return {
                 "id": run_stream_service.next_event_id(),
                 "eventType": "run.snapshot",
                 "payload": jsonable_encoder(
@@ -163,17 +164,27 @@ async def stream_run_events(run_id: str, user: AuthUser = Depends(require_auth))
                 ),
                 "createdAt": jsonable_encoder(current_run["stream_state"].get("updatedAt") or current_run.get("updated_at")),
             }
+
+        try:
+            current_run = repository.get_run(user.tenant_id, run_id) or run
+            snapshot_event = build_snapshot_event(current_run)
             seen_ids.add(str(snapshot_event["id"]))
             yield f"data: {json.dumps(snapshot_event)}\n\n"
 
-            terminal_status = {"completed", "failed", "cancelled"}
+            terminal_snapshot_sent = current_run.get("status") in terminal_status
             while True:
-                current = repository.get_run(user.tenant_id, run_id)
-                if current and current.get("status") in terminal_status and queue.empty():
-                    break
                 try:
                     event = queue.get(timeout=1.0)
                 except Empty:
+                    current = repository.get_run(user.tenant_id, run_id)
+                    if current and current.get("status") in terminal_status:
+                        if terminal_snapshot_sent:
+                            break
+                        terminal_snapshot = build_snapshot_event(current)
+                        seen_ids.add(str(terminal_snapshot["id"]))
+                        yield f"data: {json.dumps(terminal_snapshot)}\n\n"
+                        terminal_snapshot_sent = True
+                        continue
                     yield ": ping\n\n"
                     continue
                 event_id = str(event.get("id") or "")

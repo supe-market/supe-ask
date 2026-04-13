@@ -18,6 +18,7 @@ DEFAULT_MARKDOWN_TITLE = "Summary"
 DEFAULT_METRIC_TITLE = "Metric"
 DEFAULT_PLOT_TITLE = "Chart"
 DEFAULT_LOG_TITLE = "Execution log"
+DEFAULT_HIGHLIGHTS_TITLE = "Key Highlights"
 
 
 def _json_default(value: Any) -> Any:
@@ -87,6 +88,27 @@ def emit_log_lines(lines: list[str], title: str = DEFAULT_LOG_TITLE) -> None:
     if not normalized_lines:
         return
     _emit(_artifact_payload("log", title or DEFAULT_LOG_TITLE, {"lines": normalized_lines}))
+
+
+def emit_highlights(items: list[dict[str, Any]], title: str = DEFAULT_HIGHLIGHTS_TITLE, *, subtitle: str = "") -> None:
+    normalized_items: list[dict[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            "title": str(item.get("title") or "").strip(),
+            "detail": str(item.get("detail") or "").strip(),
+            "value": str(item.get("value") or "").strip(),
+            "tone": str(item.get("tone") or "neutral").strip() or "neutral",
+        }
+        if normalized["title"] or normalized["detail"] or normalized["value"]:
+            normalized_items.append(normalized)
+    if not normalized_items:
+        return
+    payload: dict[str, Any] = {"items": normalized_items}
+    if str(subtitle).strip():
+        payload["subtitle"] = str(subtitle).strip()
+    _emit(_artifact_payload("highlights", title or DEFAULT_HIGHLIGHTS_TITLE, payload))
 
 
 # ── Enhanced report helpers ───────────────────────────────────────
