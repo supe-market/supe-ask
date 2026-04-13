@@ -24,6 +24,11 @@ class SupeLibHelpersTests(unittest.TestCase):
         self.assertEqual(start_date.isoformat(), "2026-04-01")
         self.assertEqual(end_date.isoformat(), "2026-04-13")
 
+    def test_period_bounds_supports_previous_month_to_date(self):
+        start_date, end_date = period_bounds("pmtd", today=date(2026, 4, 13))
+        self.assertEqual(start_date.isoformat(), "2026-03-01")
+        self.assertEqual(end_date.isoformat(), "2026-03-13")
+
     def test_scope_and_period_filters_are_reusable(self):
         clause, params = build_scope_filter("region", "South")
         self.assertEqual(clause, "region = %(scope_value)s")
@@ -34,6 +39,10 @@ class SupeLibHelpersTests(unittest.TestCase):
         self.assertEqual(period_params["period_start"], "2026-04-01")
         self.assertEqual(period_params["period_end"], "2026-04-02")
         self.assertEqual(sql_and(clause, period_clause), "(region = %(scope_value)s) and (" + period_clause + ")")
+
+        inline_period_clause = str(build_period_filter("order_date", "pmtd", today=date(2026, 4, 13)))
+        self.assertIn("2026-03-01", inline_period_clause)
+        self.assertIn("2026-03-13", inline_period_clause)
 
     def test_dataframe_helpers_and_metrics(self):
         frame = pd.DataFrame(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .metrics import kpi_summary
@@ -16,6 +17,33 @@ DEFAULT_SCOPE_COLUMNS = {
     "beat": "beat_id",
     "salesman": "salesman_id",
 }
+
+
+@dataclass(frozen=True)
+class SqlFilterClause:
+    clause: str
+    params: dict[str, Any]
+
+    def __iter__(self):
+        yield self.clause
+        yield dict(self.params)
+
+    def __str__(self) -> str:
+        rendered = self.clause
+        for key, value in self.params.items():
+            rendered = rendered.replace(f"%({key})s", self._literal(value))
+        return rendered
+
+    @staticmethod
+    def _literal(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        escaped = str(value).replace("'", "''")
+        return f"'{escaped}'"
 
 
 def merge_params(*param_sets: dict[str, Any]) -> dict[str, Any]:
@@ -52,9 +80,9 @@ def build_period_filter(
     today: Any = None,
     start_param: str = "period_start",
     end_param: str = "period_end",
-) -> tuple[str, dict[str, Any]]:
+) -> SqlFilterClause:
     start_date, end_date = period_bounds(period, today=today)
-    return (
+    return SqlFilterClause(
         f"{date_column} >= %({start_param})s and {date_column} <= %({end_param})s",
         {start_param: start_date.isoformat(), end_param: end_date.isoformat()},
     )

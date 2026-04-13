@@ -92,13 +92,18 @@ def emit_log_lines(lines: list[str], title: str = DEFAULT_LOG_TITLE) -> None:
 # ── Enhanced report helpers ───────────────────────────────────────
 
 def emit_kpi_card(
-    label: str,
-    current: float | int,
-    previous: float | int | None = None,
+    label: str | None = None,
+    current: float | int | str | None = None,
+    previous: float | int | str | None = None,
     *,
     unit: str = "number",
     title: str = "",
     benchmark: str = "",
+    value: float | int | str | None = None,
+    delta_value: str | None = None,
+    delta_label: str | None = None,
+    positive_good: bool | None = None,
+    tone: str | None = None,
 ) -> None:
     """Emit a rich KPI metric card with optional comparison.
 
@@ -107,16 +112,24 @@ def emit_kpi_card(
     """
     from .metrics import percent_delta as _pct_delta
 
-    tone = "neutral"
+    display_label = str(label or title or "Metric")
+    display_value = current if current is not None else value
+    resolved_tone = str(tone or "neutral")
     pct_delta = None
-    if previous is not None and previous != 0:
-        pct_delta = _pct_delta(float(current), float(previous))
-        tone = "positive" if pct_delta > 0 else "negative" if pct_delta < 0 else "neutral"
+    try:
+        if previous is not None and float(previous) != 0 and display_value is not None:
+            pct_delta = _pct_delta(float(display_value), float(previous))
+            resolved_tone = "positive" if pct_delta > 0 else "negative" if pct_delta < 0 else "neutral"
+    except Exception:
+        pct_delta = None
+
+    if delta_value and tone is None and positive_good is not None:
+        resolved_tone = "positive" if positive_good else "negative"
 
     payload: dict[str, Any] = {
-        "label": label,
-        "value": current,
-        "tone": tone,
+        "label": display_label,
+        "value": display_value,
+        "tone": resolved_tone,
         "unit": unit,
     }
     if previous is not None:
@@ -124,8 +137,12 @@ def emit_kpi_card(
         payload["percentDelta"] = pct_delta
     if benchmark:
         payload["benchmark"] = benchmark
+    if delta_value:
+        payload["deltaText"] = str(delta_value)
+    if delta_label:
+        payload["deltaLabel"] = str(delta_label)
 
-    _emit(_artifact_payload("metric", title or label, payload))
+    _emit(_artifact_payload("metric", title or display_label, payload))
 
 
 def emit_section(title: str, subtitle: str = "") -> None:

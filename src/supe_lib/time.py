@@ -81,6 +81,11 @@ def period_bounds(period: str, today: date | datetime | str | None = None) -> tu
 
     if normalized in {"mtd", "month_to_date"}:
         return month_start(current), current
+    if normalized in {"pmtd", "previous_mtd", "previous_month_to_date"}:
+        previous_month_end = month_start(current) - timedelta(days=1)
+        previous_month_start = previous_month_end.replace(day=1)
+        aligned_day = min(current.day, previous_month_end.day)
+        return previous_month_start, previous_month_end.replace(day=aligned_day)
     if normalized in {"qtd", "quarter_to_date"}:
         return quarter_start(current), current
     if normalized in {"ytd", "year_to_date"}:

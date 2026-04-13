@@ -236,8 +236,15 @@ Hard requirements:
 - Use progress(...) or print("Progress: ...") for concise execution updates.
 - Print useful Info:/Result:/Warning:/Error: lines for anything worth surfacing in logs.
 - For time filtering, prefer build_period_filter(date_column, period, today=...) instead of calling period_bounds directly.
+- build_period_filter returns a reusable SQL clause helper. Safe patterns are:
+  - period_clause, period_params = build_period_filter(...)
+  - params = {{**period_params}}
+  - sql = f"... {{period_clause}} ..."
+  - df = query_df(sql, params=params, tenant_id_column="alias.tenant_id")
 - If you do call period_bounds, the first positional argument must be the period label, and any current date must be passed as today=...
 - Never pass a period label such as "mtd" or "qtd" as the today/date argument.
+- Supported comparison periods include pmtd for previous-month-to-date.
+- emit_kpi_card accepts either emit_kpi_card(label, current, previous, unit="currency") or emit_kpi_card(title="Revenue", value=..., delta_value=..., delta_label=...)
 - Do not use placeholders.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 
