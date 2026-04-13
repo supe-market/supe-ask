@@ -123,15 +123,10 @@ Hard requirements:
   - from supe_lib.time import period_bounds
   - from supe_lib.supe import build_scope_filter, build_period_filter, build_kpi_summary
 - Do not use file I/O, network I/O, subprocesses, shell commands, package installation, eval, exec, or input.
-- Always respect tenant-safe access by querying only through query_df.
-- EVERY call to query_df / query_records / query_scalar must have {{tenant_filter}} in the WHERE clause — no exceptions, including helper functions, CTEs, and subqueries. Missing it raises a hard ValueError at runtime.
-- If a table is aliased, call query_df(..., tenant_id_column="alias.tenant_id") so the runtime can expand {{tenant_filter}} safely.
-- Correct pattern (aliased table):
-    sql = "SELECT ... FROM sales_orders so WHERE so.{{tenant_filter}} AND ..."
+- Always query data through query_df, query_records, or query_scalar — never use raw psycopg2 or sqlalchemy directly.
+- Tenant isolation is enforced automatically by the runtime. Write plain SQL without any tenant_id filter — do not add WHERE tenant_id = ... manually.
+- If a table is aliased in the query, pass tenant_id_column="alias.tenant_id" to query_df so the runtime can locate the right column:
     df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
-- Correct pattern (unaliased):
-    sql = "SELECT ... FROM sales_orders WHERE {{tenant_filter}} AND ..."
-    df = query_df(sql, params=params)
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
