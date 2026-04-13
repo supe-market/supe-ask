@@ -265,6 +265,8 @@ class WarmProcessPool:
 
     def _release_worker(self, worker: WarmWorker) -> None:
         with self._lock:
+            if not worker.busy:
+                return  # already released (e.g. early release on JOB_DONE)
             should_retire = worker.uses >= self._max_uses or worker.process.poll() is not None
             if should_retire:
                 try:
@@ -321,6 +323,10 @@ class WarmProcessPool:
             line = raw.rstrip("\n")
             if line == JOB_DONE:
                 exit_reason = "job_done"
+                # Execution is confirmed done — release the worker back to the warm pool
+                # now, before the caller does any post-execution DB writes.  The finally
+                # block in run() will call _release_worker again but that is a no-op.
+                self._release_worker(worker)
                 break
             elif line == HEARTBEAT:
                 pass  # idle timer already reset above; keep waiting
@@ -332,6 +338,11 @@ class WarmProcessPool:
                 stdout_logs.append(line)
                 on_event({"type": "stdout", "payload": {"line": line}})
         logger.info("Warm worker loop exited", extra={"run_id": run_id, "exit_reason": exit_reason})
+        if exit_reason != "job_done":
+            raise RuntimeError(
+                f"Warm worker terminated before JOB_DONE (exit_reason={exit_reason}); "
+                "worker will be retired and replaced"
+            )
         return 0, stdout_logs
 
     def _run_cold(
