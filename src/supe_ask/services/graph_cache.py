@@ -64,8 +64,22 @@ class GraphCacheService:
 
     def _build_snapshot(self, tenant_id: str, refresh_id: str) -> dict[str, Any]:
         table_rows = repository.list_catalog_tables(tenant_id)
+        column_rows = repository.list_catalog_columns(tenant_id)
         relationship_rows = repository.list_catalog_relationships(tenant_id)
         alias_rows = repository.list_catalog_aliases(tenant_id)
+
+        # Index columns by table
+        columns_by_table: dict[str, list[dict[str, Any]]] = {}
+        for row in column_rows:
+            table_name = str(row["table_name"])
+            columns_by_table.setdefault(table_name, []).append({
+                "columnName": str(row["column_name"]),
+                "dataType": str(row.get("data_type") or ""),
+                "semanticRole": row.get("semantic_role"),
+                "isPrimaryKey": bool(row.get("is_primary_key")),
+                "referencesTable": row.get("references_table"),
+                "referencesColumn": row.get("references_column"),
+            })
 
         tables: dict[str, dict[str, Any]] = {}
         adjacency: dict[str, list[dict[str, Any]]] = {}
@@ -82,6 +96,7 @@ class GraphCacheService:
                 "dateColumns": list(row.get("date_columns") or []),
                 "metricHints": list(row.get("metric_hints") or []),
                 "dimensionHints": list(row.get("dimension_hints") or []),
+                "columns": columns_by_table.get(table_name, []),
             }
             adjacency.setdefault(table_name, [])
 

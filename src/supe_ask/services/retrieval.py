@@ -114,7 +114,7 @@ class RetrievalService:
         catalog_terms = self._catalog_terms(question, semantic_candidates, grounding)
         candidate_tables = self._search_catalog(tenant_id, question, catalog_terms, graph_snapshot, grounding)
         seed_tables = [candidate["tableName"] for candidate in candidate_tables[:2]]
-        expanded_tables = self._expand_tables(tenant_id, [candidate["tableName"] for candidate in candidate_tables[:4]], candidate_tables)
+        expanded_tables = self._expand_tables(tenant_id, [candidate["tableName"] for candidate in candidate_tables[:4]], candidate_tables, graph_snapshot)
         graph_neighborhood = self._expand_graph_neighbors(
             tenant_id,
             graph_snapshot,
@@ -540,14 +540,44 @@ class RetrievalService:
             adjusted.append(updated)
         return adjusted
 
-    def _expand_tables(self, tenant_id: str, table_names: list[str], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _expand_tables(
+        self,
+        tenant_id: str,
+        table_names: list[str],
+        candidates: list[dict[str, Any]],
+        graph_snapshot: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if not table_names:
             return []
         candidate_map = {item["tableName"]: item for item in candidates}
         tables = {row["table_name"]: row for row in repository.list_catalog_tables(tenant_id, table_names)}
+
+        # Use columns already embedded in the graph snapshot when available —
+        # avoids a round-trip to ask_catalog_columns and guarantees completeness.
+        graph_tables = (graph_snapshot or {}).get("tables") or {}
         columns_by_table: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in repository.list_catalog_columns(tenant_id, table_names):
-            columns_by_table[str(row["table_name"])].append(row)
+        missing_from_graph: list[str] = []
+        for table_name in table_names:
+            graph_cols = (graph_tables.get(table_name) or {}).get("columns")
+            if graph_cols is not None:
+                # Graph columns use camelCase keys — normalise to match DB row style
+                for col in graph_cols:
+                    columns_by_table[table_name].append({
+                        "column_name": col.get("columnName") or col.get("column_name"),
+                        "data_type": col.get("dataType") or col.get("data_type"),
+                        "semantic_role": col.get("semanticRole") or col.get("semantic_role"),
+                        "is_primary_key": col.get("isPrimaryKey") or col.get("is_primary_key"),
+                        "references_table": col.get("referencesTable") or col.get("references_table"),
+                        "references_column": col.get("referencesColumn") or col.get("references_column"),
+                    })
+            else:
+                missing_from_graph.append(table_name)
+
+        # Fall back to DB for any table not yet in the graph (e.g. stale Redis snapshot)
+        if missing_from_graph:
+            for row in repository.list_catalog_columns(tenant_id, missing_from_graph):
+                columns_by_table[str(row["table_name"])].append(row)
+
         relationships_by_table: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in repository.list_catalog_relationships(tenant_id, table_names):
             relationships_by_table[str(row["from_table"])].append(row)
@@ -560,36 +590,38 @@ class RetrievalService:
                 continue
             candidate = candidate_map.get(table_name, {})
             matched_columns = set(candidate.get("matchedColumns") or [])
-            # Build column list: prioritise matched + semantic-role columns so the
-            # most relevant ones survive any cap, but include ALL catalog columns
-            # so the model never has to guess a name.
+            tenant_col = row.get("tenant_column")
+
+            # Build column list: matched + semantic-role columns first, all others after.
+            # No cap — every column is included so the model never has to guess a name.
             priority_columns: list[dict[str, Any]] = []
             remaining_columns: list[dict[str, Any]] = []
             for column in columns_by_table.get(table_name, []):
-                column_name = str(column["column_name"])
+                column_name = str(column.get("column_name") or "")
                 entry = {
                     "tableName": table_name,
                     "columnName": column_name,
                     "dataType": column.get("data_type"),
                     "semanticRole": column.get("semantic_role"),
+                    "isPrimaryKey": bool(column.get("is_primary_key")),
                     "referencesTable": column.get("references_table"),
                     "referencesColumn": column.get("references_column"),
                 }
                 if (
                     column_name in matched_columns
                     or column.get("semantic_role") in {"date", "metric", "dimension"}
-                    or column_name == row.get("tenant_column")
+                    or column_name == tenant_col
                 ):
                     priority_columns.append(entry)
                 else:
                     remaining_columns.append(entry)
-            candidate_columns = priority_columns + remaining_columns
+
             expanded.append(
                 {
                     "tableName": table_name,
                     "description": row.get("description"),
                     "displayName": row.get("display_name"),
-                    "tenantColumn": row.get("tenant_column"),
+                    "tenantColumn": tenant_col,
                     "primaryKeyColumns": list(row.get("primary_key_columns") or []),
                     "dateColumns": list(row.get("date_columns") or []),
                     "metricHints": list(row.get("metric_hints") or []),
@@ -597,7 +629,7 @@ class RetrievalService:
                     "matchedScore": candidate.get("score", 0),
                     "matchedColumns": list(candidate.get("matchedColumns") or []),
                     "matchedAliases": list(candidate.get("matchedAliases") or []),
-                    "candidateColumns": candidate_columns[:40],
+                    "candidateColumns": priority_columns + remaining_columns,
                     "relationships": [
                         {
                             "fromTable": relationship.get("from_table"),
@@ -662,7 +694,7 @@ class RetrievalService:
                 candidate["score"] += 2.0 if str(edge.get("source") or "database") == "database" else 1.5
 
         ranked_neighbors = sorted(neighbor_candidates.values(), key=lambda item: (item["score"], item["tableName"]), reverse=True)[:2]
-        expanded = self._expand_tables(tenant_id, [item["tableName"] for item in ranked_neighbors], ranked_neighbors)
+        expanded = self._expand_tables(tenant_id, [item["tableName"] for item in ranked_neighbors], ranked_neighbors, graph_snapshot)
         return {
             "expandedTables": expanded,
             "graphNeighborhood": {
