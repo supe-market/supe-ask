@@ -154,6 +154,17 @@ Hard requirements:
   - params = {{**period_params}}
   - sql = f"... {{period_clause}} ..."
   - df = query_df(sql, params=params, tenant_id_column="alias.tenant_id")
+- CRITICAL — build_period_filter always uses the same param names (period_start, period_end) for every period. Never merge two sets of params from different build_period_filter calls into one query — they will silently overwrite each other and produce wrong results. The safe patterns are:
+  1. Separate queries via ThreadPoolExecutor (one future per period) — always safe, preferred:
+     mtd_clause,  mtd_params  = build_period_filter(col, 'mtd',  today=TODAY)
+     pmtd_clause, pmtd_params = build_period_filter(col, 'pmtd', today=TODAY)
+     fut_mtd  = pool.submit(query_df, f"SELECT ... WHERE {{mtd_clause}}",  params=mtd_params)
+     fut_pmtd = pool.submit(query_df, f"SELECT ... WHERE {{pmtd_clause}}", params=pmtd_params)
+  2. Single query with explicit param names to avoid collision:
+     mtd_clause,  mtd_params  = build_period_filter(col, 'mtd',  today=TODAY, start_param='mtd_start',  end_param='mtd_end')
+     pmtd_clause, pmtd_params = build_period_filter(col, 'pmtd', today=TODAY, start_param='pmtd_start', end_param='pmtd_end')
+     sql = f"SELECT 'mtd' ... WHERE {{mtd_clause}} UNION ALL SELECT 'pmtd' ... WHERE {{pmtd_clause}}"
+     df  = query_df(sql, params={{**mtd_params, **pmtd_params}})  # keys are now distinct, safe to merge
 - When you need 2 or more query_df calls whose inputs do not depend on each other's results, always fetch them in parallel using ThreadPoolExecutor. Submit all futures first, then emit each section as soon as its own future resolves — do not wait for all queries to finish before emitting anything. This is mandatory — serial queries are the single largest source of slow responses. Pattern:
   from concurrent.futures import ThreadPoolExecutor
   with ThreadPoolExecutor() as pool:
