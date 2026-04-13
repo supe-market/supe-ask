@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .dataframes import frame_records, summarize_frame
-from .plotting import figure_title, normalize_plotly_figure
+from .plotting import serialize_plotly_figure
 
 
 EVENT_PREFIX = os.getenv("SUPE_ASK_EVENT_PREFIX", "__SUPE_ASK_EVENT__")
@@ -72,12 +72,12 @@ def emit_table(frame: pd.DataFrame, title: str = DEFAULT_TABLE_TITLE, max_rows: 
 
 
 def emit_plotly(fig: Any, title: str | None = None) -> None:
-    normalized = normalize_plotly_figure(fig, title=title)
+    serialized = serialize_plotly_figure(fig, title=title)
     _emit(
         _artifact_payload(
             "plotly",
-            title or figure_title(normalized, DEFAULT_PLOT_TITLE),
-            normalized.to_plotly_json(),
+            title or str(((serialized.get("layout") or {}).get("title") or {}).get("text") or DEFAULT_PLOT_TITLE),
+            serialized,
         )
     )
 

@@ -80,6 +80,36 @@ fig.show()
         self.assertEqual(len(plotly_artifacts), 1)
         self.assertEqual(plotly_artifacts[0]["payload"]["title"], "Coverage")
 
+    @unittest.skipUnless(HAS_PLOTLY, "plotly is not installed in the local test environment")
+    def test_plotly_payload_is_json_native_for_dates_and_numpy(self):
+        events, plain_lines = capture_runtime_events(
+            """
+import datetime as dt
+import numpy as np
+import plotly.graph_objects as go
+
+fig = go.Figure(
+    data=[
+        go.Scatter(
+            x=[dt.date(2026, 4, 1), dt.date(2026, 4, 2)],
+            y=np.array([12.5, 18.0]),
+            mode="lines+markers",
+        )
+    ]
+)
+fig.update_layout(title="Normalized")
+fig.show()
+"""
+        )
+        self.assertEqual(plain_lines, [])
+        plotly_artifacts = [
+            event for event in events if event["type"] == "artifact" and event["payload"]["artifact_type"] == "plotly"
+        ]
+        self.assertEqual(len(plotly_artifacts), 1)
+        trace = plotly_artifacts[0]["payload"]["payload"]["data"][0]
+        self.assertEqual(trace["x"], ["2026-04-01", "2026-04-02"])
+        self.assertEqual(trace["y"], [12.5, 18.0])
+
 
 if __name__ == "__main__":
     unittest.main()
