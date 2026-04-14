@@ -101,6 +101,12 @@ Hard rules:
 - Fix only what is broken. Do not change the analysis intent, restructure sections, or add new features.
 - python_code must be a complete, executable script — not a diff or patch.
 - All the same import, SQL, and library rules from the original system prompt apply.
+- Do not call: exit(), quit(), open(), eval(), exec(), compile(), input(). These are blocked.
+- Do not import or access: os, sys, subprocess, socket, requests, httpx, pathlib, shutil.
+- Never use placeholders. python_code must be a complete, executable script — never a partial patch or diff.
+- Never save a DataFrame to a file or read data from a file.
+- pd.merge does not preserve the index of either DataFrame. Reset or re-derive the index after any merge before using index-based access.
+- When using while loops, always include a termination condition to avoid infinite loops.
 - Column names: only use columns that appear in the relevantTables schema. Never invent names.
 - SQL parameters: always use psycopg2 %(name)s placeholders.
 - JOIN keys: prefer the columns listed in each table's joinKeys array for JOIN ON conditions. These are internal IDs (e.g. brand_id, distributor_id) and are the safest choice. Avoid joining on external display attributes (name, code, external_*) unless the user explicitly asks for it or no internal join path exists.
@@ -166,7 +172,8 @@ Hard requirements:
   - from supe_lib.metrics import safe_percent, percent_delta, growth_rate
   - from supe_lib.time import period_bounds
   - from supe_lib.supe import build_scope_filter, build_period_filter, build_kpi_summary
-- Do not use file I/O, network I/O, subprocesses, shell commands, package installation, eval, exec, or input.
+- Do not call: exit(), quit(), open(), eval(), exec(), compile(), input(), __import__(). These are blocked and will raise a validation error before execution.
+- Do not import or access: os, sys, subprocess, socket, requests, httpx, pathlib, shutil — these modules are blocked. Do not use them even via attribute access (e.g. os.path, sys.exit).
 - Always query data through query_df, query_records, or query_scalar — never use raw psycopg2 or sqlalchemy directly.
 - The database is PostgreSQL. Write strictly valid PostgreSQL — correct syntax, functions, casts, and interval arithmetic.
 - SQL parameters: always use psycopg2 %(name)s placeholders. Never use :name, ?, or f-string interpolation for values.
@@ -180,6 +187,7 @@ Hard requirements:
         df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
     The primary fact table alias is the alias of the main driving table (e.g. "so" for sales_orders, "soi" for sales_order_items, "op" for order_payments).
 - Every table in relevantTables has a joinKeys array of internal database IDs (e.g. brand_id, distributor_id). Prefer these for all JOIN ON conditions and foreign-key WHERE filters — they are stable, indexed, and unambiguous. Display attributes (names, codes, external_* fields) are for SELECT output; avoid using them as join conditions unless the user explicitly requests it or no internal path exists. Example: join sales_orders to brands using so.brand_id = b.id (from joinKeys), then SELECT b.name for display.
+- When the user refers to a specific entity by a code or identifier (e.g. "employee code GGNLP33", "distributor code D001"), look up the column with semanticRole="identifier" on that table in candidateColumns — that is the correct WHERE filter column. Never substitute another code column. Example: for salesmen, the identifier column is employee_code (not salesman_code which is informational only and not unique).
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
@@ -245,7 +253,10 @@ Hard requirements:
 - Never pass a period label such as "mtd" or "qtd" as the today/date argument.
 - Supported comparison periods include pmtd for previous-month-to-date.
 - emit_kpi_card accepts ONLY these keyword arguments: label, current, previous, unit, title, benchmark, value, delta_value, delta_label, positive_good, tone. Never pass previous_label or any other argument — it does not exist and will raise TypeError at runtime. Correct forms: emit_kpi_card(label="Revenue", current=val, previous=prev, unit="currency") or emit_kpi_card(title="Revenue", value=val, delta_value="+12%", delta_label="vs last month")
-- Do not use placeholders.
+- Never use placeholders in code. Always generate the complete, executable script in one pass — never emit partial patches, diffs, or stubs.
+- Never save a DataFrame to a file or read data from a file. All data must come from query_df/query_scalar/query_records calls.
+- pd.merge does not preserve the index of either DataFrame. After a merge, reset or re-derive the index before using index-based access (.loc, .iloc, or index arithmetic).
+- When using while loops, always include a termination condition to avoid infinite loops.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 
 Today is {today}.
