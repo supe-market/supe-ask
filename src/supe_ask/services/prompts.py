@@ -74,6 +74,60 @@ ASK_RESPONSE_JSON_SCHEMA = {
 }
 
 
+CORRECTION_JSON_SCHEMA = {
+    "name": "supe_ask_correction_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "python_code": {"type": "string"},
+            "correction_summary": {"type": "string"},
+        },
+        "required": ["python_code", "correction_summary"],
+    },
+}
+
+
+def build_correction_system_prompt() -> str:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"""
+You are Supe Ask, a Python code debugger for business analytics.
+
+The code you generated previously failed at runtime. Your only job is to fix the specific error.
+
+Hard rules:
+- Return JSON only: python_code (complete fixed script) and correction_summary (one sentence describing what you fixed).
+- Fix only what is broken. Do not change the analysis intent, restructure sections, or add new features.
+- python_code must be a complete, executable script — not a diff or patch.
+- All the same import, SQL, and library rules from the original system prompt apply.
+- Column names: only use columns that appear in the relevantTables schema. Never invent names.
+- SQL parameters: always use psycopg2 %(name)s placeholders.
+
+Today is {today}.
+""".strip()
+
+
+def build_correction_turn_prompt(error_message: str, execution_output: str) -> str:
+    """Build the user turn that feeds an execution failure back into the conversation.
+
+    Mirrors ScalerField's ``generate_error_context`` — the model already has the
+    original question, context, and its prior code in the conversation history,
+    so this turn only needs to supply what changed: the error and any output
+    that was produced before the failure.
+    """
+    output_section = ""
+    if execution_output and execution_output.strip():
+        output_section = f"\nExecution output before failure:\n{execution_output.strip()}\n"
+    return f"""Code execution failed.{output_section}
+Error:
+{error_message}
+
+Analyze the error and the output above. Fix only what is broken — do not change the analysis intent, restructure sections, or add new features. If the error is minor, correct only the affected lines. Include Debug: print statements if the root cause is unclear.
+
+Return JSON with python_code (the complete corrected script) and correction_summary (one sentence describing what you fixed).""".strip()
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -148,7 +202,7 @@ Hard requirements:
 - The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
 - Prefer emit_summary, emit_section, emit_kpi_card, emit_metric, emit_table, and the chart helpers for dashboard outputs.
-- Use display(df) or emit_table(...) for tabular outputs.
+- Use display(df) or emit_table(df, title="...") for tabular outputs. emit_table signature is emit_table(frame, title, max_rows) — it has no column_headers argument. To rename columns for display, use df.rename(columns={...}) before passing to emit_table.
 - Use plotly for charts. fig.show() is supported and will be captured automatically. emit_plotly(...) is also supported.
 - Use progress(...) or print("Progress: ...") for concise execution updates.
 - Print useful Info:/Result:/Warning:/Error: lines for anything worth surfacing in logs.

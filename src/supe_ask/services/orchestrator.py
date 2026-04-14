@@ -17,12 +17,26 @@ from typing import Any
 from ..auth import AuthUser
 from ..repository import repository
 from .llm import LLMProviderError, llm_service
+from .prompts import build_codegen_user_prompt, build_correction_turn_prompt
 from .retrieval import retrieval_service
 from .run_stream import emit_live_run_event
 from .runner import ExecutionBootstrapError, active_runner
 from .validator import CodeValidationError, validate_python_code
 
 logger = logging.getLogger(__name__)
+
+
+MAX_ERROR_RETRY = 5
+
+
+def get_attempt_message(attempt_number: int) -> str:
+    messages = {
+        1: "Something went off track... Investigating the issue and figuring things out. Hang tight!",
+        2: "I've identified what might be causing the issue. Working on a solution now!",
+        3: "Got it! I'm implementing the solution... making sure everything lines up perfectly.",
+        4: "It's a bit tricky, so I'm applying a workaround. This should be the final touch. Fingers crossed!",
+    }
+    return messages.get(attempt_number, "This issue is more complex than anticipated. Applying advanced workarounds...")
 
 
 class RunCancelled(Exception):
@@ -142,6 +156,128 @@ class AskOrchestrator:
         if current and current.get("status") == "cancelled":
             raise RunCancelled()
 
+    def _execute_with_retry(
+        self,
+        tenant_id: str,
+        run_id: str,
+        question: str,
+        response: dict[str, Any],
+        final_context: dict[str, Any],
+        python_code: str,
+        *,
+        retries_remaining: int = MAX_ERROR_RETRY,
+        conversation_history: list[dict[str, Any]],
+    ) -> None:
+        """Execute generated code with up to MAX_ERROR_RETRY self-correction passes.
+
+        Mirrors ScalerField's recursive ``_handle_execute_code_with_retry`` pattern:
+        - attempt_number = MAX_ERROR_RETRY + 1 - retries_remaining
+        - On failure: the error turn is appended to ``conversation_history`` and
+          passed to the LLM so it has full context of every prior attempt.
+        - On correction: the model turn is appended so the next error turn builds
+          on the complete exchange — exactly how ScalerField accumulates history.
+        - When retries_remaining == 0 and still failing: surface run.failed.
+        """
+        attempt_number = MAX_ERROR_RETRY + 1 - retries_remaining
+        self._emit(
+            tenant_id, run_id, "run.execution.started",
+            {"runner": active_runner.name, "dispatchMode": "warm_pool", "attempt": attempt_number},
+            force_flush=True,
+        )
+
+        buffered_events, runtime_errors, return_code = active_runner.execute_sync(run_id, tenant_id, python_code)
+        self._raise_if_cancelled(tenant_id, run_id)
+
+        if not runtime_errors and return_code == 0:
+            # Success — replay buffered events then complete.
+            active_runner.replay_events(tenant_id, run_id, buffered_events)
+            repository.update_run_execution(run_id, status="completed", runner_completed=True)
+            repository.update_run(run_id, status="completed", completed=True)
+            self._emit(tenant_id, run_id, "run.completed", {"status": "completed"}, force_flush=True)
+            return
+
+        error_summary, error_detail = runtime_errors[-1] if runtime_errors else ("Non-zero exit", "Runner exited with a non-zero status")
+        logger.warning(
+            "Ask execution attempt %d failed",
+            attempt_number,
+            extra={"run_id": run_id, "error": error_summary, "retries_remaining": retries_remaining},
+        )
+
+        if retries_remaining <= 0:
+            # All retries exhausted — surface the error to the client.
+            repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=error_summary)
+            repository.update_run(run_id, status="failed", error_message=error_summary, completed=True)
+            self._emit(tenant_id, run_id, "run.failed", {"message": error_summary, "stage": "execution"}, force_flush=True)
+            return
+
+        # Emit the attempt-specific correction message (ScalerField get_attempt_message style).
+        self._emit(
+            tenant_id, run_id, "run.thinking",
+            {"stage": "correction", "message": get_attempt_message(attempt_number)},
+            force_flush=True,
+        )
+        self._emit(tenant_id, run_id, "run.retry.started", {"attempt": attempt_number + 1, "error": error_summary})
+
+        # Extract stdout lines from the buffered events so the model can see
+        # what the code produced before it failed — mirroring ScalerField's
+        # format_code_output_for_llm that passes execution output alongside errors.
+        execution_output = "\n".join(
+            event["payload"].get("line", "")
+            for event in buffered_events
+            if event["event_type"] == "run.execution.stdout"
+        )
+
+        # Append this attempt's error as a "user" turn so the model sees the
+        # full exchange up to this point (original prompt → model code →
+        # error feedback → model correction → error feedback → ...).
+        updated_history = conversation_history + [
+            {"role": "user", "parts": [{"text": build_correction_turn_prompt(error_detail, execution_output)}]},
+        ]
+
+        try:
+            correction, correction_raw_text = llm_service.generate_correction(updated_history)
+            corrected_code = correction["python_code"]
+            validate_python_code(corrected_code)
+        except (LLMProviderError, CodeValidationError) as error:
+            # Correction itself failed — surface the original execution error.
+            logger.warning(
+                "Self-correction attempt %d failed (%s) — surfacing original error",
+                attempt_number,
+                type(error).__name__,
+                extra={"run_id": run_id},
+            )
+            repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=error_summary)
+            repository.update_run(run_id, status="failed", error_message=error_summary, completed=True)
+            self._emit(tenant_id, run_id, "run.failed", {"message": error_summary, "stage": "execution"}, force_flush=True)
+            return
+
+        # Append the model's correction as a "model" turn so the next error
+        # feedback turn lands in proper alternating order.
+        updated_history = updated_history + [
+            {"role": "model", "parts": [{"text": correction_raw_text}]},
+        ]
+
+        repository.update_run(run_id, python_code=corrected_code)
+        self._emit(
+            tenant_id, run_id, "run.codegen.completed",
+            {
+                "title": response["title"],
+                "assistantSummary": response["assistant_summary"],
+                "pythonCode": corrected_code,
+                "artifactPlan": response["artifact_plan"],
+                "corrected": True,
+                "attempt": attempt_number + 1,
+            },
+            force_flush=True,
+        )
+
+        # Recurse with the grown history and one fewer retry remaining.
+        self._execute_with_retry(
+            tenant_id, run_id, question, response, final_context, corrected_code,
+            retries_remaining=retries_remaining - 1,
+            conversation_history=updated_history,
+        )
+
     def _fail_run(self, tenant_id: str, run_id: str, stage: str, message: str, *, traceback: Any | None = None) -> None:
         """Persist a terminal failure and emit one standardized run event."""
         repository.update_run(run_id, status="failed", error_message=message, completed=True)
@@ -256,7 +392,7 @@ class AskOrchestrator:
                 self._emit(tenant_id, run_id, "run.codegen.delta", {"delta": chunk, "raw": True})
 
             try:
-                response = llm_service.generate_analysis(
+                response, codegen_raw_text = llm_service.generate_analysis(
                     question,
                     retrieved.get("finalContext") or {},
                     on_chunk=on_codegen_chunk,
@@ -294,32 +430,29 @@ class AskOrchestrator:
 
             repository.create_message(tenant_id, thread_id, "assistant", response["assistant_summary"], run_id=run_id)
 
-            # ── STAGE 4: Execution ────────────────────────────────────
+            # ── STAGE 4: Execution with up to MAX_ERROR_RETRY self-correction retries ──
             self._emit(
-                tenant_id,
-                run_id,
-                "run.thinking",
-                {
-                    "stage": "execution",
-                    "message": "Running analysis...",
-                },
+                tenant_id, run_id, "run.thinking",
+                {"stage": "execution", "message": "Running analysis..."},
                 force_flush=True,
             )
 
-            launch_result = active_runner.launch(run_id, tenant_id, response["python_code"])
-            self._emit(
-                tenant_id,
-                run_id,
-                "run.execution.started",
-                {
-                    "runner": active_runner.name,
-                    "dispatchMode": launch_result.dispatch_mode,
-                    "taskArn": launch_result.task_arn,
-                    "queueMessageId": launch_result.queue_message_id,
-                },
-                force_flush=True,
+            python_code = response["python_code"]
+            final_context = retrieved.get("finalContext") or {}
+
+            # Seed the multi-turn conversation history with the original codegen
+            # exchange so the model has full context on every correction attempt —
+            # mirroring ScalerField's history-passing pattern.
+            conversation_history: list[dict[str, Any]] = [
+                {"role": "user", "parts": [{"text": build_codegen_user_prompt(question, final_context)}]},
+                {"role": "model", "parts": [{"text": codegen_raw_text}]},
+            ]
+
+            self._execute_with_retry(
+                tenant_id, run_id, question, response, final_context, python_code,
+                conversation_history=conversation_history,
             )
-            return
+
         except RunCancelled:
             return
         except ExecutionBootstrapError as error:

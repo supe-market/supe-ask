@@ -39,6 +39,15 @@ class ExecutionBootstrapError(RuntimeError):
     """Raised when execution cannot be handed off to the runner backend."""
 
 
+def _summarize_runtime_error(message: str, traceback_text: str) -> str:
+    """Extract the most useful single-line summary from an error + traceback."""
+    for source in (traceback_text, message):
+        lines = [line.strip() for line in str(source or "").splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+    return "Execution error"
+
+
 class WarmPoolRunner:
     """Run Ask execution in-process via a pre-warmed Python subprocess pool.
 
@@ -95,19 +104,115 @@ class WarmPoolRunner:
     # Internal execution thread
     # ------------------------------------------------------------------
 
+    def execute_sync(
+        self,
+        run_id: str,
+        tenant_id: str,
+        code: str,
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, str]], int]:
+        """Run code synchronously and collect events without emitting them to the client.
+
+        Artifacts are persisted to the DB / S3 immediately (they get IDs) so the
+        buffered event payloads are self-contained and ready for replay.  If the
+        caller decides to retry instead of replaying, the attempt-1 artifacts stay
+        in the DB but are never sent to the client — acceptable orphaning.
+
+        Returns (buffered_events, runtime_errors, return_code).
+        Each buffered event: {"event_type": str, "payload": dict, "force_flush": bool}
+        """
+        from ..artifact_utils import build_preview_payload, should_offload_artifact
+        from .artifacts import artifact_service
+
+        repository.upsert_run_execution(
+            tenant_id, run_id, self.name, "running",
+            metadata={"mode": "sync", "dispatchMode": "warm_pool", "attempt": 1},
+        )
+
+        buffered: list[dict[str, Any]] = []
+        runtime_errors: list[tuple[str, str]] = []
+
+        def collect(event_type: str, payload: dict[str, Any], *, force_flush: bool = False) -> None:
+            buffered.append({"event_type": event_type, "payload": payload, "force_flush": force_flush})
+
+        def on_event(event: dict[str, Any]) -> None:
+            event_type = str(event.get("type") or "")
+            payload = dict(event.get("payload") or {})
+
+            if event_type == "progress":
+                collect("run.execution.progress", {"message": str(payload.get("message") or "")})
+            elif event_type == "stdout":
+                collect("run.execution.stdout", {"line": str(payload.get("line") or "")})
+            elif event_type == "artifact":
+                artifact_type = str(payload.get("artifact_type") or "unknown")
+                title = str(payload.get("title") or artifact_type.title())
+                full_payload = dict(payload.get("payload") or {})
+                preview = build_preview_payload(artifact_type, full_payload)
+                storage = None
+                if settings.runner_artifact_bucket and should_offload_artifact(artifact_type, full_payload):
+                    object_key = f"ask-runs/{tenant_id}/{run_id}/artifacts/{artifact_type}.json"
+                    stored = s3_storage.put_json(settings.runner_artifact_bucket, object_key, full_payload)
+                    storage = {
+                        "storageBackend": "s3",
+                        "objectKey": stored.key,
+                        "contentType": stored.content_type,
+                        "byteSize": stored.byte_size,
+                    }
+                artifact = artifact_service.persist_artifact(
+                    tenant_id, run_id, artifact_type, title,
+                    preview_payload=preview,
+                    storage=storage,
+                    metadata={"source": "warm_pool"},
+                )
+                collect("run.artifact", {"artifact": artifact}, force_flush=True)
+            elif event_type == "error":
+                message = str(payload.get("message") or "Execution error")
+                traceback_text = str(payload.get("traceback") or "").strip()
+                summary = _summarize_runtime_error(message, traceback_text)
+                runtime_errors.append((summary, traceback_text or message))
+                logger.warning("Warm pool error event (buffered)", extra={"run_id": run_id, "runner_error": summary})
+
+        try:
+            return_code, logs = self._pool.run(run_id, tenant_id, code, on_event)
+        except Exception as error:
+            logger.exception("Warm pool execute_sync failed", extra={"run_id": run_id})
+            runtime_errors.append((str(error), str(error)))
+            return buffered, runtime_errors, 1
+
+        if runtime_errors:
+            for summary, detail in runtime_errors:
+                logs.extend(
+                    [line for line in [f"Error: {summary}", detail] for line in str(line).splitlines() if line.strip()]
+                )
+
+        if logs:
+            artifact = artifact_service.persist_artifact(
+                tenant_id, run_id, "log", "Execution log",
+                preview_payload=build_preview_payload("log", {"lines": logs}),
+                storage=None,
+                metadata={"source": "warm_pool"},
+            )
+            collect("run.artifact", {"artifact": artifact}, force_flush=True)
+
+        return buffered, runtime_errors, return_code
+
+    def replay_events(self, tenant_id: str, run_id: str, events: list[dict[str, Any]]) -> None:
+        """Emit previously buffered events to the live run stream."""
+        from .run_stream import emit_live_run_event
+
+        for event in events:
+            emit_live_run_event(
+                tenant_id, run_id,
+                event["event_type"],
+                event["payload"],
+                force_flush=event.get("force_flush", False),
+            )
+
     def _execute(self, run_id: str, tenant_id: str, code: str) -> None:
         from ..artifact_utils import build_preview_payload, should_offload_artifact
         from .artifacts import artifact_service
         from .run_stream import emit_live_run_event
 
         runtime_errors: list[tuple[str, str]] = []
-
-        def summarize_runtime_error(message: str, traceback_text: str) -> str:
-            for source in (traceback_text, message):
-                lines = [line.strip() for line in str(source or "").splitlines() if line.strip()]
-                if lines:
-                    return lines[-1]
-            return "Execution error"
 
         def on_event(event: dict[str, Any]) -> None:
             event_type = str(event.get("type") or "")
@@ -150,7 +255,7 @@ class WarmPoolRunner:
             elif event_type == "error":
                 message = str(payload.get("message") or "Execution error")
                 traceback_text = str(payload.get("traceback") or "").strip()
-                summary = summarize_runtime_error(message, traceback_text)
+                summary = _summarize_runtime_error(message, traceback_text)
                 runtime_errors.append((summary, traceback_text or message))
                 logger.warning("Warm pool error event", extra={"run_id": run_id, "runner_error": summary})
 

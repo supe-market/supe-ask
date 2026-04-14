@@ -28,6 +28,9 @@ from .prompts import (
     ASK_RESPONSE_JSON_SCHEMA,
     build_codegen_system_prompt,
     build_codegen_user_prompt,
+    build_correction_system_prompt,
+    build_correction_turn_prompt,
+    CORRECTION_JSON_SCHEMA,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,23 +56,6 @@ class LLMResponseParseError(LLMProviderError):
     """Raised when the provider returns an unusable payload."""
 
 
-def _object_to_dict(value: Any) -> dict[str, Any]:
-    """Convert SDK helper objects into plain dicts when possible."""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "model_dump"):
-        dumped = value.model_dump()
-        return dumped if isinstance(dumped, dict) else {}
-    if hasattr(value, "to_dict"):
-        dumped = value.to_dict()
-        return dumped if isinstance(dumped, dict) else {}
-    try:
-        return dict(value)
-    except Exception:
-        return {}
-
 
 def _classify_request_error(error: Exception, operation: str) -> LLMProviderError:
     """Map provider exceptions into auth-vs-request buckets for clearer UX."""
@@ -92,7 +78,9 @@ class LLMProvider(Protocol):
 
     def validate(self) -> None: ...
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]: ...
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]: ...
+
+    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]: ...
 
 
 class NullProvider:
@@ -101,7 +89,10 @@ class NullProvider:
     def validate(self) -> None:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
+    def generate_analysis(self, _question: str, _final_context: dict[str, Any], _on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
+        raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
+
+    def generate_correction(self, _conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
 
@@ -180,8 +171,12 @@ class VertexGeminiProvider:
         )
         self._get_client()
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
-        """Generate the final Python report code, streaming raw token chunks when possible."""
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
+        """Generate the final Python report code, streaming raw token chunks when possible.
+
+        Returns ``(parsed_payload, raw_json_text)`` so the caller can replay the
+        model turn verbatim in a subsequent multi-turn correction call.
+        """
         client = self._get_client()
         logger.info(
             "Calling Vertex AI code generator",
@@ -220,7 +215,7 @@ class VertexGeminiProvider:
                 raise LLMResponseParseError(f"Gemini code generator returned invalid JSON: {error}") from error
             if not isinstance(payload, dict):
                 raise LLMResponseParseError("Gemini code generator returned a non-object JSON payload")
-            return payload
+            return payload, accumulated_text
 
         # Non-streaming fallback (used by tests and non-SSE callers).
         try:
@@ -233,13 +228,7 @@ class VertexGeminiProvider:
             logger.exception("Vertex AI codegen request failed")
             raise _classify_request_error(error, "code generation") from error
 
-        parsed = getattr(response, "parsed", None)
-        if parsed is not None:
-            payload = parsed if isinstance(parsed, dict) else _object_to_dict(parsed)
-            if payload:
-                return payload
-
-        text = getattr(response, "text", None)
+        text = getattr(response, "text", None) or ""
         if not text:
             raise LLMResponseParseError("Gemini code generator returned no parseable response")
         try:
@@ -248,7 +237,53 @@ class VertexGeminiProvider:
             raise LLMResponseParseError(f"Gemini code generator returned invalid JSON: {error}") from error
         if not isinstance(payload, dict):
             raise LLMResponseParseError("Gemini code generator returned a non-object JSON payload")
-        return payload
+        return payload, text
+
+    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+        """Generate a corrected script using the full multi-turn conversation history.
+
+        ``conversation_history`` is a list of Gemini Content dicts alternating
+        between ``"user"`` and ``"model"`` roles, starting with the original
+        codegen user prompt and the model's first response, followed by one
+        ``"user"`` error-feedback turn per failed attempt.  The model therefore
+        has full context of every prior attempt when producing each correction —
+        mirroring ScalerField's recursive history-passing pattern.
+        """
+        client = self._get_client()
+        logger.info(
+            "Calling Vertex AI code corrector",
+            extra={
+                "provider": "vertex_gemini",
+                "model": settings.vertex_model_codegen,
+                "history_turns": len(conversation_history),
+            },
+        )
+        config = {
+            "system_instruction": build_correction_system_prompt(),
+            "temperature": 0,
+            "response_mime_type": "application/json",
+            "response_json_schema": CORRECTION_JSON_SCHEMA["schema"],
+        }
+        try:
+            response = client.models.generate_content(
+                model=settings.vertex_model_codegen,
+                contents=conversation_history,
+                config=config,
+            )
+        except Exception as error:
+            logger.exception("Vertex AI correction request failed")
+            raise _classify_request_error(error, "code correction") from error
+
+        text = getattr(response, "text", None) or ""
+        if not text:
+            raise LLMResponseParseError("Gemini correction returned no parseable response")
+        try:
+            payload = json.loads(text)
+        except Exception as error:
+            raise LLMResponseParseError(f"Gemini correction returned invalid JSON: {error}") from error
+        if not isinstance(payload, dict) or not payload.get("python_code"):
+            raise LLMResponseParseError("Gemini correction returned an unusable payload")
+        return payload, text
 
 
 class LLMService:
@@ -266,9 +301,17 @@ class LLMService:
         """Validate that the configured provider is ready before serving traffic."""
         self._provider.validate()
 
-    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> dict[str, Any]:
-        """Generate the final Python report code from the finalized retrieval context."""
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
+        """Generate the final Python report code from the finalized retrieval context.
+
+        Returns ``(parsed_payload, raw_json_text)`` — the raw text is replayed
+        as the first ``"model"`` turn when building the correction history.
+        """
         return self._provider.generate_analysis(question, final_context, on_chunk=on_chunk)
+
+    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+        """Generate a corrected script using the full multi-turn conversation history."""
+        return self._provider.generate_correction(conversation_history)
 
 
 llm_service = LLMService()

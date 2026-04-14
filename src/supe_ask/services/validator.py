@@ -66,6 +66,13 @@ def validate_python_code(code: str) -> None:
                 raise CodeValidationError(
                     "Use build_period_filter(...) or call period_bounds(period, today=...) with at most one positional argument"
                 )
+            if isinstance(func, ast.Name) and func.id == "emit_table":
+                bad_kwargs = {kw.arg for kw in node.keywords if kw.arg not in {"frame", "title", "max_rows", None}}
+                if bad_kwargs:
+                    raise CodeValidationError(
+                        f"emit_table() does not accept keyword argument(s): {', '.join(sorted(bad_kwargs))}. "
+                        "Signature is emit_table(frame, title, max_rows). To rename columns use df.rename(columns={{...}}) before calling emit_table."
+                    )
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id in BLOCKED_MODULE_PREFIXES:
                 raise CodeValidationError(f"Access to '{node.value.id}.{node.attr}' is not allowed")
