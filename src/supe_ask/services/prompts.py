@@ -103,7 +103,7 @@ Hard rules:
 - All the same import, SQL, and library rules from the original system prompt apply.
 - Column names: only use columns that appear in the relevantTables schema. Never invent names.
 - SQL parameters: always use psycopg2 %(name)s placeholders.
-- JOIN keys: use only the columns listed in each table's joinKeys array for JOIN ON conditions. These are internal IDs (e.g. brand_id, distributor_id). Never join on display attributes like name or code.
+- JOIN keys: prefer the columns listed in each table's joinKeys array for JOIN ON conditions. These are internal IDs (e.g. brand_id, distributor_id) and are the safest choice. Avoid joining on external display attributes (name, code, external_*) unless the user explicitly asks for it or no internal join path exists.
 - Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id" (e.g. tenant_id_column="so.tenant_id"). A bare tenant_id filter on a JOIN query causes psycopg2.errors.AmbiguousColumn.
 - SQL column aliases must be valid identifiers — never write AS <number> (e.g. AS 0). Wrong: COUNT(*) AS 0 AS total_orders. Correct: COUNT(*) AS total_orders.
 
@@ -179,7 +179,7 @@ Hard requirements:
     2. Any query with a JOIN: you MUST pass tenant_id_column="<primary_fact_table_alias>.tenant_id":
         df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
     The primary fact table alias is the alias of the main driving table (e.g. "so" for sales_orders, "soi" for sales_order_items, "op" for order_payments).
-- CRITICAL — every table in relevantTables has a joinKeys array. These are the ONLY columns to use in JOIN ON conditions and foreign-key WHERE filters. They are internal database IDs, not user-facing display values. Display attributes (names, codes, descriptions) are for SELECT output only — never use them as join conditions. Example: join sales_orders to brands using so.brand_id = b.id (from joinKeys), then SELECT b.name for display.
+- Every table in relevantTables has a joinKeys array of internal database IDs (e.g. brand_id, distributor_id). Prefer these for all JOIN ON conditions and foreign-key WHERE filters — they are stable, indexed, and unambiguous. Display attributes (names, codes, external_* fields) are for SELECT output; avoid using them as join conditions unless the user explicitly requests it or no internal path exists. Example: join sales_orders to brands using so.brand_id = b.id (from joinKeys), then SELECT b.name for display.
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.
