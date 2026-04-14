@@ -103,6 +103,7 @@ Hard rules:
 - All the same import, SQL, and library rules from the original system prompt apply.
 - Column names: only use columns that appear in the relevantTables schema. Never invent names.
 - SQL parameters: always use psycopg2 %(name)s placeholders.
+- Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id" (e.g. tenant_id_column="so.tenant_id"). A bare tenant_id filter on a JOIN query causes psycopg2.errors.AmbiguousColumn.
 
 Today is {today}.
 """.strip()
@@ -170,8 +171,11 @@ Hard requirements:
 - Column names: only use columns that appear in the relevantTables schema provided in the context. Never invent or guess column names. If a column you need is not in the schema, note the gap in working_assumptions and work around it.
 - ORDER BY: column aliases defined in SELECT are visible in a bare ORDER BY (ORDER BY alias) but not inside expressions. Never write ORDER BY CASE WHEN alias = ... — repeat the full expression or use a positional index (ORDER BY 1).
 - Tenant isolation is enforced automatically by the runtime. Write plain SQL without any tenant_id filter — do not add WHERE tenant_id = ... manually.
-- If a table is aliased in the query, pass tenant_id_column="alias.tenant_id" to query_df so the runtime can locate the right column:
-    df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
+- CRITICAL — tenant_id_column is MANDATORY for any query that joins two or more tables. The runtime injects a bare "tenant_id = ..." filter; without an explicit alias it becomes ambiguous and crashes with psycopg2.errors.AmbiguousColumn. Rules:
+    1. Single-table query (no JOIN): you may omit tenant_id_column and the default works fine.
+    2. Any query with a JOIN: you MUST pass tenant_id_column="<primary_fact_table_alias>.tenant_id":
+        df = query_df(sql, params=params, tenant_id_column="so.tenant_id")
+    The primary fact table alias is the alias of the main driving table (e.g. "so" for sales_orders, "soi" for sales_order_items, "op" for order_payments).
 - Prefer the provided questionGrounding, analysisPlan, relevantTables, and joinPaths over inventing structure.
 - Treat final_context.queryGuardrails as hard constraints, especially blockedTables and preferredFactTables.
 - Use semanticPolicies.datePolicies, semanticPolicies.thresholdPolicies, and semanticPolicies.metricAliases when present before making assumptions.

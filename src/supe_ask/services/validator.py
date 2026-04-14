@@ -73,6 +73,31 @@ def validate_python_code(code: str) -> None:
                         f"emit_table() does not accept keyword argument(s): {', '.join(sorted(bad_kwargs))}. "
                         "Signature is emit_table(frame, title, max_rows). To rename columns use df.rename(columns={{...}}) before calling emit_table."
                     )
+            if isinstance(func, ast.Name) and func.id == "query_df":
+                kwarg_names = {kw.arg for kw in node.keywords}
+                if "tenant_id_column" not in kwarg_names:
+                    # Try to resolve the SQL string from the first positional arg or 'sql' kwarg.
+                    sql_node = None
+                    if node.args:
+                        sql_node = node.args[0]
+                    else:
+                        for kw in node.keywords:
+                            if kw.arg == "sql":
+                                sql_node = kw.value
+                                break
+                    sql_text = None
+                    if isinstance(sql_node, ast.Constant) and isinstance(sql_node.value, str):
+                        sql_text = sql_node.value
+                    elif isinstance(sql_node, ast.JoinedStr):
+                        # f-string: concatenate any constant parts we can read
+                        parts = [v.value for v in sql_node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+                        sql_text = " ".join(parts)
+                    if sql_text and "join" in sql_text.lower():
+                        raise CodeValidationError(
+                            "query_df() call with a JOIN query is missing tenant_id_column. "
+                            "Pass tenant_id_column=\"<fact_alias>.tenant_id\" (e.g. tenant_id_column=\"so.tenant_id\") "
+                            "to avoid psycopg2.errors.AmbiguousColumn at runtime."
+                        )
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id in BLOCKED_MODULE_PREFIXES:
                 raise CodeValidationError(f"Access to '{node.value.id}.{node.attr}' is not allowed")
