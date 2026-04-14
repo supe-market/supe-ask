@@ -104,6 +104,7 @@ Hard rules:
 - Column names: only use columns that appear in the relevantTables schema. Never invent names.
 - SQL parameters: always use psycopg2 %(name)s placeholders.
 - Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id" (e.g. tenant_id_column="so.tenant_id"). A bare tenant_id filter on a JOIN query causes psycopg2.errors.AmbiguousColumn.
+- SQL column aliases must be valid identifiers — never write AS <number> (e.g. AS 0). Wrong: COUNT(*) AS 0 AS total_orders. Correct: COUNT(*) AS total_orders.
 
 Today is {today}.
 """.strip()
@@ -170,6 +171,7 @@ Hard requirements:
 - SQL parameters: always use psycopg2 %(name)s placeholders. Never use :name, ?, or f-string interpolation for values.
 - Column names: only use columns that appear in the relevantTables schema provided in the context. Never invent or guess column names. If a column you need is not in the schema, note the gap in working_assumptions and work around it.
 - ORDER BY: column aliases defined in SELECT are visible in a bare ORDER BY (ORDER BY alias) but not inside expressions. Never write ORDER BY CASE WHEN alias = ... — repeat the full expression or use a positional index (ORDER BY 1).
+- SQL column aliases must be valid identifiers. Never write `AS <number>` (e.g. AS 0, AS 1) — that is a syntax error. Wrong: `COUNT(*) AS 0 AS total_orders`. Correct: `COUNT(*) AS total_orders`.
 - Tenant isolation is enforced automatically by the runtime. Write plain SQL without any tenant_id filter — do not add WHERE tenant_id = ... manually.
 - CRITICAL — tenant_id_column is MANDATORY for any query that joins two or more tables. The runtime injects a bare "tenant_id = ..." filter; without an explicit alias it becomes ambiguous and crashes with psycopg2.errors.AmbiguousColumn. Rules:
     1. Single-table query (no JOIN): you may omit tenant_id_column and the default works fine.

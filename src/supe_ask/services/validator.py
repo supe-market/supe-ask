@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 
 
 ALLOWED_IMPORTS = {
@@ -108,3 +109,9 @@ def validate_python_code(code: str) -> None:
                     raise CodeValidationError(
                         f"Querying '{table_name}' is not allowed for Ask-generated business analysis; recalculate from raw fact tables"
                     )
+            # Catch numeric aliases like `COUNT(*) AS 0 AS total_orders` — always a syntax error in PostgreSQL.
+            if re.search(r"\bAS\s+\d+\b", node.value, re.IGNORECASE):
+                raise CodeValidationError(
+                    "SQL contains a numeric column alias (e.g. AS 0). Column aliases must be valid identifiers. "
+                    "Wrong: COUNT(*) AS 0 AS total_orders. Correct: COUNT(*) AS total_orders."
+                )
