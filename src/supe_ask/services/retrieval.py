@@ -616,6 +616,25 @@ class RetrievalService:
                 else:
                     remaining_columns.append(entry)
 
+            # Derive explicit join keys from column metadata so the model has a
+            # single authoritative list of columns to use in JOIN / ON conditions.
+            # These are the internal IDs — never user-facing display attributes.
+            all_columns = priority_columns + remaining_columns
+            join_keys: list[dict[str, Any]] = []
+            for col in all_columns:
+                if col.get("isPrimaryKey"):
+                    join_keys.append({
+                        "columnName": col["columnName"],
+                        "role": "primary_key",
+                    })
+                elif col.get("referencesTable"):
+                    join_keys.append({
+                        "columnName": col["columnName"],
+                        "role": "foreign_key",
+                        "referencesTable": col["referencesTable"],
+                        "referencesColumn": col.get("referencesColumn"),
+                    })
+
             expanded.append(
                 {
                     "tableName": table_name,
@@ -626,6 +645,7 @@ class RetrievalService:
                     "dateColumns": list(row.get("date_columns") or []),
                     "metricHints": list(row.get("metric_hints") or []),
                     "dimensionHints": list(row.get("dimension_hints") or []),
+                    "joinKeys": join_keys,
                     "matchedScore": candidate.get("score", 0),
                     "matchedColumns": list(candidate.get("matchedColumns") or []),
                     "matchedAliases": list(candidate.get("matchedAliases") or []),
