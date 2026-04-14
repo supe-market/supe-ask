@@ -74,6 +74,15 @@ def validate_python_code(code: str) -> None:
                         f"emit_table() does not accept keyword argument(s): {', '.join(sorted(bad_kwargs))}. "
                         "Signature is emit_table(frame, title, max_rows). To rename columns use df.rename(columns={{...}}) before calling emit_table."
                     )
+            if isinstance(func, ast.Name) and func.id == "emit_kpi_card":
+                VALID_KPI_KWARGS = {"label", "current", "previous", "unit", "title", "benchmark", "value", "delta_value", "delta_label", "positive_good", "tone", None}
+                bad_kwargs = {kw.arg for kw in node.keywords if kw.arg not in VALID_KPI_KWARGS}
+                if bad_kwargs:
+                    raise CodeValidationError(
+                        f"emit_kpi_card() does not accept keyword argument(s): {', '.join(sorted(bad_kwargs))}. "
+                        "Valid kwargs: label, current, previous, unit, title, benchmark, value, delta_value, delta_label, positive_good, tone. "
+                        "Did you mean delta_label instead of previous_label?"
+                    )
             if isinstance(func, ast.Name) and func.id == "query_df":
                 kwarg_names = {kw.arg for kw in node.keywords}
                 if "tenant_id_column" not in kwarg_names:

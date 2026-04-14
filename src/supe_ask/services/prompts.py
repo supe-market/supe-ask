@@ -244,7 +244,7 @@ Hard requirements:
 - If you do call period_bounds, the first positional argument must be the period label, and any current date must be passed as today=...
 - Never pass a period label such as "mtd" or "qtd" as the today/date argument.
 - Supported comparison periods include pmtd for previous-month-to-date.
-- emit_kpi_card accepts either emit_kpi_card(label, current, previous, unit="currency") or emit_kpi_card(title="Revenue", value=..., delta_value=..., delta_label=...)
+- emit_kpi_card accepts ONLY these keyword arguments: label, current, previous, unit, title, benchmark, value, delta_value, delta_label, positive_good, tone. Never pass previous_label or any other argument — it does not exist and will raise TypeError at runtime. Correct forms: emit_kpi_card(label="Revenue", current=val, previous=prev, unit="currency") or emit_kpi_card(title="Revenue", value=val, delta_value="+12%", delta_label="vs last month")
 - Do not use placeholders.
 - If the question is underspecified, still generate the best useful first-pass analysis rather than refusing.
 
