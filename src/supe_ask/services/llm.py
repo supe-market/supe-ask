@@ -309,7 +309,7 @@ class DatabricksClaudeProvider:
             raise LLMProviderNotConfigured("DATABRICKS_TOKEN must be configured for Claude via Databricks")
         self._client = anthropic_sdk.Anthropic(
             base_url=settings.databricks_base_url,
-            api_key=settings.databricks_token,
+            auth_token=settings.databricks_token,
         )
         return self._client
 
