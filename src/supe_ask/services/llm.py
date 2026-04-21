@@ -303,12 +303,12 @@ class DatabricksClaudeProvider:
             return self._client
         if anthropic_sdk is None:
             raise LLMProviderNotConfigured("anthropic must be installed for ASK_LLM_PROVIDER=databricks_claude")
-        if not settings.databricks_host:
-            raise LLMProviderNotConfigured("DATABRICKS_HOST must be configured for Claude via Databricks")
+        if not settings.databricks_base_url:
+            raise LLMProviderNotConfigured("DATABRICKS_BASE_URL must be configured for Claude via Databricks")
         if not settings.databricks_token:
             raise LLMProviderNotConfigured("DATABRICKS_TOKEN must be configured for Claude via Databricks")
         self._client = anthropic_sdk.Anthropic(
-            base_url=f"https://{settings.databricks_host}/serving-endpoints",
+            base_url=settings.databricks_base_url,
             api_key=settings.databricks_token,
         )
         return self._client
@@ -319,7 +319,7 @@ class DatabricksClaudeProvider:
             "Validated Databricks Claude provider",
             extra={
                 "provider": "databricks_claude",
-                "host": settings.databricks_host,
+                "base_url": settings.databricks_base_url,
                 "model": settings.claude_model_codegen,
             },
         )

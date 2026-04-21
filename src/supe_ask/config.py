@@ -75,7 +75,7 @@ class Settings:
     vertex_model_retrieval: str = _env("VERTEX_MODEL_RETRIEVAL", "gemini-2.5-flash")
     vertex_model_codegen: str = _env("VERTEX_MODEL_CODEGEN", "gemini-2.5-pro")
     # Claude via Databricks Model Serving
-    databricks_host: str = _env("DATABRICKS_HOST", "")
+    databricks_base_url: str = _env("DATABRICKS_BASE_URL", "")
     databricks_token: str = _env("DATABRICKS_TOKEN", "")
     claude_model_codegen: str = _env("CLAUDE_MODEL_CODEGEN", "databricks-claude-sonnet-4-6")
     schema_refresh_interval_seconds: int = int(_env("ASK_SCHEMA_REFRESH_INTERVAL_SECONDS", "21600"))
