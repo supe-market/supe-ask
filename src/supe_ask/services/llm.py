@@ -62,6 +62,20 @@ class LLMResponseParseError(LLMProviderError):
     """Raised when the provider returns an unusable payload."""
 
 
+def _strip_json_fence(text: str) -> str:
+    """Strip markdown code fences that LLMs sometimes wrap around JSON output."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # Remove opening fence (```json or ```)
+        first_newline = stripped.find("\n")
+        if first_newline == -1:
+            return stripped
+        stripped = stripped[first_newline + 1:]
+        # Remove closing fence
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+    return stripped.strip()
+
 
 def _classify_request_error(error: Exception, operation: str) -> LLMProviderError:
     """Map provider exceptions into auth-vs-request buckets for clearer UX."""
@@ -362,7 +376,7 @@ class DatabricksClaudeProvider:
         if not accumulated:
             raise LLMResponseParseError("Claude code generator returned no response")
         try:
-            payload = json.loads(accumulated)
+            payload = json.loads(_strip_json_fence(accumulated))
         except Exception as error:
             raise LLMResponseParseError(f"Claude code generator returned invalid JSON: {error}") from error
         if not isinstance(payload, dict):
@@ -399,7 +413,7 @@ class DatabricksClaudeProvider:
         if not text:
             raise LLMResponseParseError("Claude correction returned no response")
         try:
-            payload = json.loads(text)
+            payload = json.loads(_strip_json_fence(text))
         except Exception as error:
             raise LLMResponseParseError(f"Claude correction returned invalid JSON: {error}") from error
         if not isinstance(payload, dict) or not payload.get("python_code"):
