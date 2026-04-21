@@ -49,3 +49,7 @@ def kpi_summary(label: str, current: float, previous: float) -> dict[str, Any]:
         "percentDelta": percent_change,
         "tone": tone,
     }
+
+
+# Re-export formatting helpers so generated code works regardless of import path
+from .report import fmt_currency, fmt_number, fmt_percent

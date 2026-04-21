@@ -3,12 +3,36 @@ from __future__ import annotations
 import builtins
 import contextlib
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+
+from .charts import bar_chart, line_chart, pie_chart, waterfall_chart
+from .db import query_df, query_records, query_scalar
 from .display import display as emit_display
+from .metrics import growth_rate, percent_delta, safe_percent
 from .plotting import figure_title
-from .report import emit_log_lines, emit_plotly, progress
+from .report import (
+    emit_highlights,
+    emit_kpi_card,
+    emit_log_lines,
+    emit_markdown,
+    emit_metric,
+    emit_plotly,
+    emit_section,
+    emit_summary,
+    emit_table,
+    fmt_currency,
+    fmt_number,
+    fmt_percent,
+    progress,
+)
+from .supe import build_kpi_summary, build_period_filter, build_scope_filter
+from .time import period_bounds
 
 
 ALLOWED_IMPORT_ROOTS = {
@@ -133,8 +157,45 @@ def execute_user_code(user_code: str) -> None:
     globals_dict = {
         "__builtins__": _safe_builtins(context),
         "__name__": "__main__",
-        "display": context.display,
+        # Pre-injected libraries
+        "pd": pd,
+        "px": px,
+        "go": go,
+        "ThreadPoolExecutor": ThreadPoolExecutor,
+        # Data access
+        "query_df": query_df,
+        "query_records": query_records,
+        "query_scalar": query_scalar,
+        # Report / emit functions
+        "emit_markdown": emit_markdown,
+        "emit_metric": emit_metric,
+        "emit_table": emit_table,
+        "emit_plotly": emit_plotly,
+        "emit_kpi_card": emit_kpi_card,
+        "emit_section": emit_section,
+        "emit_summary": emit_summary,
+        "emit_highlights": emit_highlights,
         "progress": progress,
+        # Formatting
+        "fmt_currency": fmt_currency,
+        "fmt_percent": fmt_percent,
+        "fmt_number": fmt_number,
+        # Metrics
+        "safe_percent": safe_percent,
+        "percent_delta": percent_delta,
+        "growth_rate": growth_rate,
+        # Charts
+        "bar_chart": bar_chart,
+        "line_chart": line_chart,
+        "pie_chart": pie_chart,
+        "waterfall_chart": waterfall_chart,
+        # Scope / period / KPI helpers
+        "build_scope_filter": build_scope_filter,
+        "build_period_filter": build_period_filter,
+        "build_kpi_summary": build_kpi_summary,
+        "period_bounds": period_bounds,
+        # Display
+        "display": context.display,
     }
     locals_dict = globals_dict
 

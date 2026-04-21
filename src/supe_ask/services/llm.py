@@ -1,7 +1,8 @@
-"""LLM integration for semantic resolution and Python code generation.
+"""LLM integration for Python code generation.
 
-`supe-ask` currently uses Gemini on Vertex AI. Provider failures are surfaced
-explicitly so Ask runs fail with a clear stage instead of degrading quietly.
+Supports multiple providers: Gemini on Vertex AI and Claude on Databricks.
+Provider failures are surfaced explicitly so Ask runs fail with a clear
+stage instead of degrading quietly.
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ except ImportError:  # pragma: no cover - exercised in environments without the 
     DefaultCredentialsError = RuntimeError
     RefreshError = RuntimeError
     GoogleAuthRequest = None
+
+try:
+    import anthropic as anthropic_sdk
+except ImportError:
+    anthropic_sdk = None
 
 from ..config import settings
 from .prompts import (
@@ -96,7 +102,7 @@ class NullProvider:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
 
-class VertexGeminiProvider:
+class GeminiProvider:
     """Gemini-on-Vertex implementation of the Ask provider contract."""
 
     def __init__(
@@ -286,6 +292,121 @@ class VertexGeminiProvider:
         return payload, text
 
 
+class DatabricksClaudeProvider:
+    """Claude on Databricks Model Serving."""
+
+    def __init__(self) -> None:
+        self._client: Any | None = None
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if anthropic_sdk is None:
+            raise LLMProviderNotConfigured("anthropic must be installed for ASK_LLM_PROVIDER=databricks_claude")
+        if not settings.databricks_host:
+            raise LLMProviderNotConfigured("DATABRICKS_HOST must be configured for Claude via Databricks")
+        if not settings.databricks_token:
+            raise LLMProviderNotConfigured("DATABRICKS_TOKEN must be configured for Claude via Databricks")
+        self._client = anthropic_sdk.Anthropic(
+            base_url=f"https://{settings.databricks_host}/serving-endpoints",
+            api_key=settings.databricks_token,
+        )
+        return self._client
+
+    def validate(self) -> None:
+        self._get_client()
+        logger.info(
+            "Validated Databricks Claude provider",
+            extra={
+                "provider": "databricks_claude",
+                "host": settings.databricks_host,
+                "model": settings.claude_model_codegen,
+            },
+        )
+
+    def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
+        client = self._get_client()
+        system_prompt = build_codegen_system_prompt()
+        user_prompt = build_codegen_user_prompt(question, final_context)
+        logger.info(
+            "Calling Databricks Claude code generator",
+            extra={"provider": "databricks_claude", "model": settings.claude_model_codegen},
+        )
+
+        try:
+            if on_chunk is not None:
+                accumulated = ""
+                with client.messages.stream(
+                    model=settings.claude_model_codegen,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    max_tokens=16384,
+                    temperature=0,
+                ) as stream:
+                    for text in stream.text_stream:
+                        accumulated += text
+                        on_chunk(text)
+            else:
+                response = client.messages.create(
+                    model=settings.claude_model_codegen,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    max_tokens=16384,
+                    temperature=0,
+                )
+                accumulated = response.content[0].text
+        except Exception as error:
+            logger.exception("Databricks Claude codegen failed")
+            raise LLMRequestError(f"Databricks Claude request failed during code generation: {error}") from error
+
+        if not accumulated:
+            raise LLMResponseParseError("Claude code generator returned no response")
+        try:
+            payload = json.loads(accumulated)
+        except Exception as error:
+            raise LLMResponseParseError(f"Claude code generator returned invalid JSON: {error}") from error
+        if not isinstance(payload, dict):
+            raise LLMResponseParseError("Claude code generator returned a non-object JSON payload")
+        return payload, accumulated
+
+    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+        """Normalize Gemini history format to Claude messages format."""
+        client = self._get_client()
+        logger.info(
+            "Calling Databricks Claude code corrector",
+            extra={"provider": "databricks_claude", "model": settings.claude_model_codegen, "history_turns": len(conversation_history)},
+        )
+        messages: list[dict[str, str]] = []
+        for turn in conversation_history:
+            role = "assistant" if turn.get("role") == "model" else "user"
+            parts = turn.get("parts") or []
+            text = parts[0]["text"] if parts else ""
+            messages.append({"role": role, "content": text})
+
+        try:
+            response = client.messages.create(
+                model=settings.claude_model_codegen,
+                system=build_correction_system_prompt(),
+                messages=messages,
+                max_tokens=16384,
+                temperature=0,
+            )
+        except Exception as error:
+            logger.exception("Databricks Claude correction failed")
+            raise LLMRequestError(f"Databricks Claude request failed during code correction: {error}") from error
+
+        text = response.content[0].text
+        if not text:
+            raise LLMResponseParseError("Claude correction returned no response")
+        try:
+            payload = json.loads(text)
+        except Exception as error:
+            raise LLMResponseParseError(f"Claude correction returned invalid JSON: {error}") from error
+        if not isinstance(payload, dict) or not payload.get("python_code"):
+            raise LLMResponseParseError("Claude correction returned an unusable payload")
+        return payload, text
+
+
 class LLMService:
     """Wrap structured LLM calls used by Ask."""
 
@@ -294,7 +415,9 @@ class LLMService:
 
     def _build_provider(self) -> LLMProvider:
         if settings.ask_llm_provider == "vertex_gemini":
-            return VertexGeminiProvider()
+            return GeminiProvider()
+        if settings.ask_llm_provider == "databricks_claude":
+            return DatabricksClaudeProvider()
         return NullProvider()
 
     def validate_provider(self) -> None:
