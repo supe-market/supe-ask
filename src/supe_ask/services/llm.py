@@ -422,16 +422,9 @@ class DatabricksClaudeProvider:
             },
         )
 
-    # Prompt caching: the system prompt is identical across requests for the same tenant,
-    # so marking it ephemeral saves ~1s TTFT and reduces token cost on repeat calls.
-    _CACHE_BETA_HEADER = {"anthropic-beta": "prompt-caching-2024-07-31"}
-
-    def _cached_system(self, text: str) -> list[dict[str, Any]]:
-        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
         client = self._get_client()
-        system = self._cached_system(build_codegen_system_prompt())
+        system_prompt = build_codegen_system_prompt()
         user_prompt = build_codegen_user_prompt(question, final_context)
         logger.info(
             "Calling Databricks Claude code generator (tool use)",
@@ -444,13 +437,12 @@ class DatabricksClaudeProvider:
             if on_chunk is not None:
                 with client.messages.stream(
                     model=settings.claude_model_codegen,
-                    system=system,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],
                     max_tokens=16384,
                     temperature=0,
                     tools=[_GENERATE_ANALYSIS_TOOL],
                     tool_choice={"type": "tool", "name": "generate_analysis"},
-                    extra_headers=self._CACHE_BETA_HEADER,
                 ) as stream:
                     for event in stream:
                         if event.type == "input_json":
@@ -461,13 +453,12 @@ class DatabricksClaudeProvider:
             else:
                 response = client.messages.create(
                     model=settings.claude_model_codegen,
-                    system=system,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],
                     max_tokens=16384,
                     temperature=0,
                     tools=[_GENERATE_ANALYSIS_TOOL],
                     tool_choice={"type": "tool", "name": "generate_analysis"},
-                    extra_headers=self._CACHE_BETA_HEADER,
                 )
                 tool_block = next((b for b in response.content if b.type == "tool_use"), None)
         except Exception as error:
@@ -497,13 +488,12 @@ class DatabricksClaudeProvider:
         try:
             response = client.messages.create(
                 model=settings.claude_model_codegen,
-                system=self._cached_system(build_correction_system_prompt_claude()),
+                system=build_correction_system_prompt_claude(),
                 messages=messages,
                 max_tokens=8192,
                 temperature=0,
                 tools=[_GENERATE_CORRECTION_TOOL],
                 tool_choice={"type": "tool", "name": "generate_correction"},
-                extra_headers=self._CACHE_BETA_HEADER,
             )
         except Exception as error:
             logger.exception("Databricks Claude correction failed")
