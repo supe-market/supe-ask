@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -117,24 +118,79 @@ Today is {today}.
 """.strip()
 
 
-def build_correction_turn_prompt(error_message: str, execution_output: str) -> str:
-    """Build the user turn that feeds an execution failure back into the conversation.
-
-    Mirrors ScalerField's ``generate_error_context`` — the model already has the
-    original question, context, and its prior code in the conversation history,
-    so this turn only needs to supply what changed: the error and any output
-    that was produced before the failure.
-    """
+def build_correction_turn_prompt(error_message: str, execution_output: str, current_code: str = "") -> str:
+    """Build the user turn that feeds an execution failure back into the conversation."""
     output_section = ""
     if execution_output and execution_output.strip():
         output_section = f"\nExecution output before failure:\n{execution_output.strip()}\n"
-    return f"""Code execution failed.{output_section}
+    code_section = ""
+    if current_code and current_code.strip():
+        code_section = f"\nCurrent code:\n```python\n{current_code.strip()}\n```\n"
+    return f"""Code execution failed.{output_section}{code_section}
 Error:
 {error_message}
 
-Analyze the error and the output above. Fix only what is broken — do not change the analysis intent, restructure sections, or add new features. If the error is minor, correct only the affected lines. Include Debug: print statements if the root cause is unclear.
+Analyze the error and the output above. Fix only what is broken — do not change the analysis intent, restructure sections, or add new features. If the error is minor, correct only the affected lines. Include Debug: print statements if the root cause is unclear.""".strip()
 
-Return JSON with python_code (the complete corrected script) and correction_summary (one sentence describing what you fixed).""".strip()
+
+def apply_search_replace(original: str, diff_text: str) -> str:
+    """Apply SEARCH/REPLACE diff blocks produced by Claude to source code.
+
+    Expects blocks in the standard merge-conflict style:
+        <<<<<<< SEARCH
+        <exact lines to find>
+        =======
+        <replacement lines>
+        >>>>>>> REPLACE
+    """
+    pattern = re.compile(
+        r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE",
+        re.DOTALL,
+    )
+    result = original
+    for match in pattern.finditer(diff_text):
+        search_text = match.group(1)
+        replace_text = match.group(2)
+        if search_text in result:
+            result = result.replace(search_text, replace_text, 1)
+    return result
+
+
+def build_correction_system_prompt_claude() -> str:
+    """Correction system prompt for Claude tool-use — instructs SEARCH/REPLACE diffs."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"""
+You are Supe Ask, a Python code debugger for business analytics.
+
+The code you generated previously failed at runtime. Your only job is to fix the specific error.
+
+Use the generate_correction tool. Return the fix as one or more SEARCH/REPLACE blocks in the
+search_replace_diff field — change only the broken lines. Unchanged code must not appear in the diff.
+
+SEARCH/REPLACE block format (each change must be a separate block):
+<<<<<<< SEARCH
+<exact lines to find in the current code, verbatim>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+
+Hard rules:
+- Fix only what is broken. Do not change the analysis intent, restructure sections, or add new features.
+- All the same import, SQL, and library rules from the original system prompt apply.
+- Do not call: exit(), quit(), open(), eval(), exec(), compile(), input(). These are blocked.
+- Do not import or access: os, sys, subprocess, socket, requests, httpx, pathlib, shutil.
+- Never use placeholders. The search_replace_diff must be complete and applicable.
+- Never save a DataFrame to a file or read data from a file.
+- pd.merge does not preserve the index of either DataFrame. Reset or re-derive the index after any merge before using index-based access.
+- When using while loops, always include a termination condition to avoid infinite loops.
+- Column names: only use columns that appear in the relevantTables schema. Never invent names.
+- SQL parameters: always use psycopg2 %(name)s placeholders.
+- JOIN keys: prefer the columns listed in each table's joinKeys array for JOIN ON conditions.
+- Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id".
+- SQL column aliases must be valid identifiers — never write AS <number>.
+
+Today is {today}.
+""".strip()
 
 
 def _json_safe(value: Any) -> Any:

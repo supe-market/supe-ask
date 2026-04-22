@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 MAX_ERROR_RETRY = 5
 
 
+def _check_output_quality(stdout: str) -> str | None:
+    """Scan execution stdout for common data quality signals.
+
+    Returns a human-readable warning string if any signal is detected, else None.
+    """
+    lower = stdout.lower()
+    checks = [
+        ("nan", "Some computed values returned NaN — check for division by zero or missing data joins."),
+        ("empty dataframe", "One or more queries returned an empty DataFrame — check date filters or join conditions."),
+        (" 0 rows", "A query returned 0 rows — results may be incomplete."),
+        ("inf", "Some computed values are infinite — possible division by zero."),
+    ]
+    for pattern, message in checks:
+        if pattern in lower:
+            return message
+    return None
+
+
 def get_attempt_message(attempt_number: int) -> str:
     messages = {
         1: "Something went off track... Investigating the issue and figuring things out. Hang tight!",
@@ -191,6 +209,18 @@ class AskOrchestrator:
         if not runtime_errors and return_code == 0:
             # Success — replay buffered events then complete.
             active_runner.replay_events(tenant_id, run_id, buffered_events)
+
+            # Heuristic quality scan: warn the user if stdout suggests NaN/empty data.
+            stdout_text = "\n".join(
+                event["payload"].get("line", "")
+                for event in buffered_events
+                if event["event_type"] == "run.execution.stdout"
+            )
+            quality_warning = _check_output_quality(stdout_text)
+            if quality_warning:
+                logger.info("Output quality warning for run %s: %s", run_id, quality_warning)
+                self._emit(tenant_id, run_id, "run.planning.delta", {"delta": f"\nNote: {quality_warning}", "chunkIndex": 99})
+
             repository.update_run_execution(run_id, status="completed", runner_completed=True)
             repository.update_run(run_id, status="completed", completed=True)
             self._emit(tenant_id, run_id, "run.completed", {"status": "completed"}, force_flush=True)
@@ -231,11 +261,11 @@ class AskOrchestrator:
         # full exchange up to this point (original prompt → model code →
         # error feedback → model correction → error feedback → ...).
         updated_history = conversation_history + [
-            {"role": "user", "parts": [{"text": build_correction_turn_prompt(error_detail, execution_output)}]},
+            {"role": "user", "parts": [{"text": build_correction_turn_prompt(error_detail, execution_output, current_code=python_code)}]},
         ]
 
         try:
-            correction, correction_raw_text = llm_service.generate_correction(updated_history)
+            correction, correction_raw_text = llm_service.generate_correction(updated_history, current_code=python_code)
             corrected_code = correction["python_code"]
             validate_python_code(corrected_code)
         except (LLMProviderError, CodeValidationError) as error:
@@ -261,10 +291,10 @@ class AskOrchestrator:
         self._emit(
             tenant_id, run_id, "run.codegen.completed",
             {
-                "title": response["title"],
-                "assistantSummary": response["assistant_summary"],
+                "title": response.get("title", ""),
+                "assistantSummary": response.get("assistant_summary", ""),
                 "pythonCode": corrected_code,
-                "artifactPlan": response["artifact_plan"],
+                "artifactPlan": response.get("artifact_plan", {}),
                 "corrected": True,
                 "attempt": attempt_number + 1,
             },
@@ -404,10 +434,10 @@ class AskOrchestrator:
 
             repository.update_run(
                 run_id,
-                title=response["title"],
-                assistant_summary=response["assistant_summary"],
-                python_code=response["python_code"],
-                artifact_plan=response["artifact_plan"],
+                title=response.get("title", ""),
+                assistant_summary=response.get("assistant_summary", ""),
+                python_code=response.get("python_code", ""),
+                artifact_plan=response.get("artifact_plan", {}),
             )
             self._raise_if_cancelled(tenant_id, run_id)
 
@@ -418,17 +448,17 @@ class AskOrchestrator:
                 run_id,
                 "run.codegen.completed",
                 {
-                    "title": response["title"],
-                    "assistantSummary": response["assistant_summary"],
-                    "pythonCode": response["python_code"],
-                    "artifactPlan": response["artifact_plan"],
+                    "title": response.get("title", ""),
+                    "assistantSummary": response.get("assistant_summary", ""),
+                    "pythonCode": response.get("python_code", ""),
+                    "artifactPlan": response.get("artifact_plan", {}),
                 },
                 force_flush=True,
             )
 
-            validate_python_code(response["python_code"])
+            validate_python_code(response.get("python_code", ""))
 
-            repository.create_message(tenant_id, thread_id, "assistant", response["assistant_summary"], run_id=run_id)
+            repository.create_message(tenant_id, thread_id, "assistant", response.get("assistant_summary", ""), run_id=run_id)
 
             # ── STAGE 4: Execution with up to MAX_ERROR_RETRY self-correction retries ──
             self._emit(
@@ -437,7 +467,7 @@ class AskOrchestrator:
                 force_flush=True,
             )
 
-            python_code = response["python_code"]
+            python_code = response.get("python_code", "")
             final_context = retrieved.get("finalContext") or {}
 
             # Seed the multi-turn conversation history with the original codegen

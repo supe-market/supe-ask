@@ -32,9 +32,11 @@ except ImportError:
 from ..config import settings
 from .prompts import (
     ASK_RESPONSE_JSON_SCHEMA,
+    apply_search_replace,
     build_codegen_system_prompt,
     build_codegen_user_prompt,
     build_correction_system_prompt,
+    build_correction_system_prompt_claude,
     build_correction_turn_prompt,
     CORRECTION_JSON_SCHEMA,
 )
@@ -100,7 +102,7 @@ class LLMProvider(Protocol):
 
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]: ...
 
-    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]: ...
+    def generate_correction(self, conversation_history: list[dict[str, Any]], current_code: str = "") -> tuple[dict[str, Any], str]: ...
 
 
 class NullProvider:
@@ -112,7 +114,7 @@ class NullProvider:
     def generate_analysis(self, _question: str, _final_context: dict[str, Any], _on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
-    def generate_correction(self, _conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    def generate_correction(self, _conversation_history: list[dict[str, Any]], _current_code: str = "") -> tuple[dict[str, Any], str]:
         raise LLMProviderNotConfigured(f"Unsupported ASK_LLM_PROVIDER value: {settings.ask_llm_provider}")
 
 
@@ -259,7 +261,7 @@ class GeminiProvider:
             raise LLMResponseParseError("Gemini code generator returned a non-object JSON payload")
         return payload, text
 
-    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    def generate_correction(self, conversation_history: list[dict[str, Any]], current_code: str = "") -> tuple[dict[str, Any], str]:
         """Generate a corrected script using the full multi-turn conversation history.
 
         ``conversation_history`` is a list of Gemini Content dicts alternating
@@ -306,6 +308,88 @@ class GeminiProvider:
         return payload, text
 
 
+# Tool definitions for the Anthropic tool-use protocol.
+# Using tool_choice={"type":"tool","name":"..."} forces Claude to return a
+# structured tool call instead of free text, making JSON extraction
+# model-version-agnostic (no fences, no json.loads on prose).
+_GENERATE_ANALYSIS_TOOL: dict = {
+    "name": "generate_analysis",
+    "description": "Generate Python analytics code and report metadata for the business question.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title":              {"type": "string"},
+            "assistant_summary":  {"type": "string"},
+            "python_code":        {"type": "string"},
+            "follow_up_needed":   {"type": "boolean"},
+            "follow_up_question": {"type": "string"},
+            "artifact_plan": {
+                "type": "object",
+                "properties": {
+                    "report_sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"title": {"type": "string"}, "subtitle": {"type": "string"}},
+                            "required": ["title", "subtitle"],
+                        },
+                    },
+                    "working_assumptions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 4,
+                    },
+                    "suggested_next_questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 3,
+                        "maxItems": 3,
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type":   {"type": "string"},
+                                "title":  {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["type", "title", "reason"],
+                        },
+                    },
+                },
+                "required": ["report_sections", "suggested_next_questions", "artifacts"],
+            },
+        },
+        "required": [
+            "title", "assistant_summary", "python_code",
+            "follow_up_needed", "follow_up_question", "artifact_plan",
+        ],
+    },
+}
+
+_GENERATE_CORRECTION_TOOL: dict = {
+    "name": "generate_correction",
+    "description": "Return the fix as SEARCH/REPLACE diff blocks and a one-sentence summary of what was changed.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "search_replace_diff": {
+                "type": "string",
+                "description": (
+                    "One or more SEARCH/REPLACE blocks. Each block: "
+                    "<<<<<<< SEARCH\\n<exact lines to find>\\n=======\\n<replacement lines>\\n>>>>>>> REPLACE"
+                ),
+            },
+            "correction_summary": {"type": "string"},
+        },
+        "required": ["search_replace_diff", "correction_summary"],
+    },
+}
+
+
 class DatabricksClaudeProvider:
     """Claude on Databricks Model Serving."""
 
@@ -338,56 +422,69 @@ class DatabricksClaudeProvider:
             },
         )
 
+    # Prompt caching: the system prompt is identical across requests for the same tenant,
+    # so marking it ephemeral saves ~1s TTFT and reduces token cost on repeat calls.
+    _CACHE_BETA_HEADER = {"anthropic-beta": "prompt-caching-2024-07-31"}
+
+    def _cached_system(self, text: str) -> list[dict[str, Any]]:
+        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
     def generate_analysis(self, question: str, final_context: dict[str, Any], on_chunk: StreamCallback | None = None) -> tuple[dict[str, Any], str]:
         client = self._get_client()
-        system_prompt = build_codegen_system_prompt()
+        system = self._cached_system(build_codegen_system_prompt())
         user_prompt = build_codegen_user_prompt(question, final_context)
         logger.info(
-            "Calling Databricks Claude code generator",
+            "Calling Databricks Claude code generator (tool use)",
             extra={"provider": "databricks_claude", "model": settings.claude_model_codegen},
         )
 
+        tool_block = None
+        accumulated = ""
         try:
             if on_chunk is not None:
-                accumulated = ""
                 with client.messages.stream(
                     model=settings.claude_model_codegen,
-                    system=system_prompt,
+                    system=system,
                     messages=[{"role": "user", "content": user_prompt}],
                     max_tokens=16384,
                     temperature=0,
+                    tools=[_GENERATE_ANALYSIS_TOOL],
+                    tool_choice={"type": "tool", "name": "generate_analysis"},
+                    extra_headers=self._CACHE_BETA_HEADER,
                 ) as stream:
-                    for text in stream.text_stream:
-                        accumulated += text
-                        on_chunk(text)
+                    for event in stream:
+                        if event.type == "input_json":
+                            accumulated += event.partial_json
+                            on_chunk(event.partial_json)
+                    final_message = stream.get_final_message()
+                tool_block = next((b for b in final_message.content if b.type == "tool_use"), None)
             else:
                 response = client.messages.create(
                     model=settings.claude_model_codegen,
-                    system=system_prompt,
+                    system=system,
                     messages=[{"role": "user", "content": user_prompt}],
                     max_tokens=16384,
                     temperature=0,
+                    tools=[_GENERATE_ANALYSIS_TOOL],
+                    tool_choice={"type": "tool", "name": "generate_analysis"},
+                    extra_headers=self._CACHE_BETA_HEADER,
                 )
-                accumulated = response.content[0].text
+                tool_block = next((b for b in response.content if b.type == "tool_use"), None)
         except Exception as error:
             logger.exception("Databricks Claude codegen failed")
             raise LLMRequestError(f"Databricks Claude request failed during code generation: {error}") from error
 
-        if not accumulated:
-            raise LLMResponseParseError("Claude code generator returned no response")
-        try:
-            payload = json.loads(_strip_json_fence(accumulated))
-        except Exception as error:
-            raise LLMResponseParseError(f"Claude code generator returned invalid JSON: {error}") from error
-        if not isinstance(payload, dict):
-            raise LLMResponseParseError("Claude code generator returned a non-object JSON payload")
-        return payload, accumulated
+        if not tool_block or not isinstance(getattr(tool_block, "input", None), dict):
+            raise LLMResponseParseError("Claude did not invoke the generate_analysis tool")
+        payload: dict[str, Any] = tool_block.input
+        raw_text = accumulated if accumulated else json.dumps(payload)
+        return payload, raw_text
 
-    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
-        """Normalize Gemini history format to Claude messages format."""
+    def generate_correction(self, conversation_history: list[dict[str, Any]], current_code: str = "") -> tuple[dict[str, Any], str]:
+        """Normalize Gemini history format to Claude messages format and request a SEARCH/REPLACE correction."""
         client = self._get_client()
         logger.info(
-            "Calling Databricks Claude code corrector",
+            "Calling Databricks Claude code corrector (tool use)",
             extra={"provider": "databricks_claude", "model": settings.claude_model_codegen, "history_turns": len(conversation_history)},
         )
         messages: list[dict[str, str]] = []
@@ -400,25 +497,36 @@ class DatabricksClaudeProvider:
         try:
             response = client.messages.create(
                 model=settings.claude_model_codegen,
-                system=build_correction_system_prompt(),
+                system=self._cached_system(build_correction_system_prompt_claude()),
                 messages=messages,
-                max_tokens=16384,
+                max_tokens=8192,
                 temperature=0,
+                tools=[_GENERATE_CORRECTION_TOOL],
+                tool_choice={"type": "tool", "name": "generate_correction"},
+                extra_headers=self._CACHE_BETA_HEADER,
             )
         except Exception as error:
             logger.exception("Databricks Claude correction failed")
             raise LLMRequestError(f"Databricks Claude request failed during code correction: {error}") from error
 
-        text = response.content[0].text
-        if not text:
-            raise LLMResponseParseError("Claude correction returned no response")
-        try:
-            payload = json.loads(_strip_json_fence(text))
-        except Exception as error:
-            raise LLMResponseParseError(f"Claude correction returned invalid JSON: {error}") from error
-        if not isinstance(payload, dict) or not payload.get("python_code"):
-            raise LLMResponseParseError("Claude correction returned an unusable payload")
-        return payload, text
+        tool_block = next((b for b in response.content if b.type == "tool_use"), None)
+        if not tool_block or not isinstance(getattr(tool_block, "input", None), dict):
+            raise LLMResponseParseError("Claude did not invoke the generate_correction tool")
+
+        diff_text = tool_block.input.get("search_replace_diff", "")
+        correction_summary = tool_block.input.get("correction_summary", "")
+
+        if not diff_text:
+            raise LLMResponseParseError("Claude correction returned an empty diff")
+        if not current_code:
+            raise LLMResponseParseError("generate_correction called without current_code — cannot apply diff")
+
+        applied_code = apply_search_replace(current_code, diff_text)
+        if not applied_code or not applied_code.strip():
+            raise LLMResponseParseError("SEARCH/REPLACE diff could not be applied to the current code")
+
+        payload: dict[str, Any] = {"python_code": applied_code, "correction_summary": correction_summary}
+        return payload, json.dumps(payload)
 
 
 class LLMService:
@@ -446,9 +554,9 @@ class LLMService:
         """
         return self._provider.generate_analysis(question, final_context, on_chunk=on_chunk)
 
-    def generate_correction(self, conversation_history: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    def generate_correction(self, conversation_history: list[dict[str, Any]], current_code: str = "") -> tuple[dict[str, Any], str]:
         """Generate a corrected script using the full multi-turn conversation history."""
-        return self._provider.generate_correction(conversation_history)
+        return self._provider.generate_correction(conversation_history, current_code=current_code)
 
 
 llm_service = LLMService()
