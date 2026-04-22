@@ -176,6 +176,7 @@ SEARCH/REPLACE block format (each change must be a separate block):
 
 Hard rules:
 - Fix only what is broken. Do not change the analysis intent, restructure sections, or add new features.
+- When fixing a wrong SQL column name in a query, audit ALL columns in that same SQL block and fix every other column that is not in the relevantTables schema. Fix them all in a single SEARCH/REPLACE block covering the whole SELECT/FROM/JOIN/WHERE/GROUP BY section — do not leave any guessed column names in the same query.
 - All the same import, SQL, and library rules from the original system prompt apply.
 - Do not call: exit(), quit(), open(), eval(), exec(), compile(), input(). These are blocked.
 - Do not import or access: os, sys, subprocess, socket, requests, httpx, pathlib, shutil.
@@ -186,7 +187,7 @@ Hard rules:
 - Column names: only use columns that appear in the relevantTables schema. Never invent names.
 - SQL parameters: always use psycopg2 %(name)s placeholders.
 - JOIN keys: prefer the columns listed in each table's joinKeys array for JOIN ON conditions.
-- Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id".
+- Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id". Schema-only queries (e.g. information_schema) that need no tenant filter must pass tenant_id_column=None.
 - SQL column aliases must be valid identifiers — never write AS <number>.
 
 Today is {today}.

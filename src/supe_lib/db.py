@@ -45,10 +45,10 @@ def _normalize_params(params: list | tuple | dict | None) -> list | dict:
     raise TypeError("params must be a list, tuple, dict, or None")
 
 
-def _validate_statement(statement: str, tenant_id_column: str) -> None:
+def _validate_statement(statement: str, tenant_id_column: str | None) -> None:
     if not READ_ONLY_PATTERN.search(statement) or BLOCKED_PATTERN.search(statement) or ";" in statement.rstrip(";"):
         raise ValueError("Only a single read-only SQL statement is allowed")
-    if not TENANT_FILTER_PATTERN.match(tenant_id_column):
+    if tenant_id_column is not None and not TENANT_FILTER_PATTERN.match(tenant_id_column):
         raise ValueError("tenant_id_column contains invalid characters")
 
 
@@ -111,21 +111,22 @@ def _tenant_id() -> str:
 def _bind_query(
     sql: str,
     params: list | tuple | dict | None = None,
-    tenant_id_column: str = "tenant_id",
+    tenant_id_column: str | None = "tenant_id",
 ) -> tuple[str, list | dict]:
     statement = sql.strip()
     _validate_statement(statement, tenant_id_column)
-    tenant_id = _tenant_id()
     query_params = _normalize_params(params)
 
+    if tenant_id_column is None:
+        return statement, query_params
+
+    tenant_id = _tenant_id()
     use_dict = isinstance(query_params, dict)
 
     if TENANT_FILTER_TOKEN in statement:
-        # Placeholder present — replace inline.
         filter_expr = f"{tenant_id_column} = %(tenant_id)s" if use_dict else f"{tenant_id_column} = %s"
         statement = statement.replace(TENANT_FILTER_TOKEN, filter_expr)
     else:
-        # No placeholder — auto-inject so generated code doesn't need to know about tenants.
         logger.debug("Auto-injecting tenant filter into SQL without placeholder")
         statement = _inject_tenant_filter(statement, tenant_id_column, use_dict)
 
@@ -140,7 +141,7 @@ def _bind_query(
 def query_df(
     sql: str,
     params: list | tuple | dict | None = None,
-    tenant_id_column: str = "tenant_id",
+    tenant_id_column: str | None = "tenant_id",
 ) -> pd.DataFrame:
     statement, query_params = _bind_query(sql, params=params, tenant_id_column=tenant_id_column)
     connection = psycopg2.connect(_dsn())
@@ -154,7 +155,7 @@ def query_df(
 def query_records(
     sql: str,
     params: list | tuple | dict | None = None,
-    tenant_id_column: str = "tenant_id",
+    tenant_id_column: str | None = "tenant_id",
 ) -> list[dict[str, Any]]:
     frame = query_df(sql, params=params, tenant_id_column=tenant_id_column)
     return normalize_frame_nulls(frame).to_dict(orient="records")
@@ -163,7 +164,7 @@ def query_records(
 def query_scalar(
     sql: str,
     params: list | tuple | dict | None = None,
-    tenant_id_column: str = "tenant_id",
+    tenant_id_column: str | None = "tenant_id",
     default: Any = None,
 ) -> Any:
     frame = query_df(sql, params=params, tenant_id_column=tenant_id_column)
