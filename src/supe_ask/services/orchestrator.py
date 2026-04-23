@@ -465,6 +465,11 @@ class AskOrchestrator:
                     self._fail_run(tenant_id, run_id, "codegen", str(error))
                     return
 
+                # Provider didn't stream (e.g. Databricks tool-use doesn't emit input_json events).
+                # Emit the python_code as a single chunk so the canvas auto-opens.
+                if not accumulated_json and response.get("python_code"):
+                    on_codegen_chunk(response["python_code"])
+
                 repository.update_run(
                     run_id,
                     title=response.get("title", ""),
