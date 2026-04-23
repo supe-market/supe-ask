@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 MAX_ERROR_RETRY = 5
+MAX_CODEGEN_RETRY = 1  # outer loop: one full regen after correction loop exhausted
+
+
+class ExecutionRetryExhausted(Exception):
+    """Correction loop exhausted — signals the outer loop to regenerate code."""
+
+    def __init__(self, error_summary: str) -> None:
+        super().__init__(error_summary)
+        self.error_summary = error_summary
 
 
 def _check_output_quality(stdout: str) -> str | None:
@@ -234,11 +243,9 @@ class AskOrchestrator:
         )
 
         if retries_remaining <= 0:
-            # All retries exhausted — surface the error to the client.
+            # All correction retries exhausted — signal the outer loop to regenerate.
             repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=error_summary)
-            repository.update_run(run_id, status="failed", error_message=error_summary, completed=True)
-            self._emit(tenant_id, run_id, "run.failed", {"message": error_summary, "stage": "execution"}, force_flush=True)
-            return
+            raise ExecutionRetryExhausted(error_summary)
 
         # Emit the attempt-specific correction message (ScalerField get_attempt_message style).
         self._emit(
@@ -269,17 +276,15 @@ class AskOrchestrator:
             corrected_code = correction["python_code"]
             validate_python_code(corrected_code)
         except (LLMProviderError, CodeValidationError) as error:
-            # Correction itself failed — surface the original execution error.
+            # Correction LLM failed — signal the outer loop to regenerate.
             logger.warning(
-                "Self-correction attempt %d failed (%s) — surfacing original error",
+                "Self-correction attempt %d failed (%s) — signalling outer loop",
                 attempt_number,
                 type(error).__name__,
                 extra={"run_id": run_id},
             )
             repository.update_run_execution(run_id, status="failed", runner_completed=True, stop_reason=error_summary)
-            repository.update_run(run_id, status="failed", error_message=error_summary, completed=True)
-            self._emit(tenant_id, run_id, "run.failed", {"message": error_summary, "stage": "execution"}, force_flush=True)
-            return
+            raise ExecutionRetryExhausted(error_summary)
 
         # Append the model's correction as a "model" turn so the next error
         # feedback turn lands in proper alternating order.
@@ -416,76 +421,105 @@ class AskOrchestrator:
             )
             self._emit(tenant_id, run_id, "run.codegen.started", {})
 
-            # Stream raw JSON tokens to the frontend so the code tab
-            # populates in real-time (like ScalarField's live code preview).
-            accumulated_json = ""
-
-            def on_codegen_chunk(chunk: str) -> None:
-                nonlocal accumulated_json
-                accumulated_json += chunk
-                self._emit(tenant_id, run_id, "run.codegen.delta", {"delta": chunk, "raw": True})
-
-            try:
-                response, codegen_raw_text = llm_service.generate_analysis(
-                    question,
-                    retrieved.get("finalContext") or {},
-                    on_chunk=on_codegen_chunk,
-                )
-            except Exception as error:
-                logger.exception("Ask code generation failed", extra={"run_id": run_id, "tenant_id": tenant_id})
-                self._fail_run(tenant_id, run_id, "codegen", str(error))
-                return
-
-            repository.update_run(
-                run_id,
-                title=response.get("title", ""),
-                assistant_summary=response.get("assistant_summary", ""),
-                python_code=response.get("python_code", ""),
-                artifact_plan=response.get("artifact_plan", {}),
-            )
-            self._raise_if_cancelled(tenant_id, run_id)
-
-            # Emit title + summary as a structured header event BEFORE
-            # execution starts so the user sees the answer forming.
-            self._emit(
-                tenant_id,
-                run_id,
-                "run.codegen.completed",
-                {
-                    "title": response.get("title", ""),
-                    "assistantSummary": response.get("assistant_summary", ""),
-                    "pythonCode": response.get("python_code", ""),
-                    "artifactPlan": response.get("artifact_plan", {}),
-                },
-                force_flush=True,
-            )
-
-            validate_python_code(response.get("python_code", ""))
-
-            repository.create_message(tenant_id, thread_id, "assistant", response.get("assistant_summary", ""), run_id=run_id)
-
-            # ── STAGE 4: Execution with up to MAX_ERROR_RETRY self-correction retries ──
-            self._emit(
-                tenant_id, run_id, "run.thinking",
-                {"stage": "execution", "message": "Running analysis..."},
-                force_flush=True,
-            )
-
-            python_code = response.get("python_code", "")
             final_context = retrieved.get("finalContext") or {}
+            prior_failure: str | None = None
 
-            # Seed the multi-turn conversation history with the original codegen
-            # exchange so the model has full context on every correction attempt —
-            # mirroring ScalerField's history-passing pattern.
-            conversation_history: list[dict[str, Any]] = [
-                {"role": "user", "parts": [{"text": build_codegen_user_prompt(question, final_context)}]},
-                {"role": "model", "parts": [{"text": codegen_raw_text}]},
-            ]
+            # ── STAGE 3+4: Outer codegen loop — regenerate on correction exhaustion ──
+            for outer_attempt in range(MAX_CODEGEN_RETRY + 1):
+                if outer_attempt > 0:
+                    repository.delete_run_artifacts(run_id)
+                    self._emit(tenant_id, run_id, "run.artifacts.reset", {}, force_flush=True)
+                    self._emit(
+                        tenant_id, run_id, "run.thinking",
+                        {"stage": "codegen", "message": "Previous approach failed. Trying a fresh strategy..."},
+                        force_flush=True,
+                    )
+                    self._emit(tenant_id, run_id, "run.codegen.started", {})
 
-            self._execute_with_retry(
-                tenant_id, run_id, question, response, final_context, python_code,
-                conversation_history=conversation_history,
-            )
+                # Inject prior failure context so the model tries a different approach.
+                effective_question = question
+                if prior_failure:
+                    effective_question = (
+                        f"{question}\n\n"
+                        f"[CONTEXT: A previous code attempt failed after all self-correction passes. "
+                        f"Last error: {prior_failure}. "
+                        f"Please try a fundamentally different approach — different tables, "
+                        f"different aggregation logic, or a simpler query structure.]"
+                    )
+
+                accumulated_json = ""
+
+                def on_codegen_chunk(chunk: str) -> None:
+                    nonlocal accumulated_json
+                    accumulated_json += chunk
+                    self._emit(tenant_id, run_id, "run.codegen.delta", {"delta": chunk, "raw": True})
+
+                try:
+                    response, codegen_raw_text = llm_service.generate_analysis(
+                        effective_question,
+                        final_context,
+                        on_chunk=on_codegen_chunk,
+                    )
+                except Exception as error:
+                    logger.exception("Ask code generation failed", extra={"run_id": run_id, "tenant_id": tenant_id})
+                    self._fail_run(tenant_id, run_id, "codegen", str(error))
+                    return
+
+                repository.update_run(
+                    run_id,
+                    title=response.get("title", ""),
+                    assistant_summary=response.get("assistant_summary", ""),
+                    python_code=response.get("python_code", ""),
+                    artifact_plan=response.get("artifact_plan", {}),
+                )
+                self._raise_if_cancelled(tenant_id, run_id)
+
+                self._emit(
+                    tenant_id,
+                    run_id,
+                    "run.codegen.completed",
+                    {
+                        "title": response.get("title", ""),
+                        "assistantSummary": response.get("assistant_summary", ""),
+                        "pythonCode": response.get("python_code", ""),
+                        "artifactPlan": response.get("artifact_plan", {}),
+                    },
+                    force_flush=True,
+                )
+
+                validate_python_code(response.get("python_code", ""))
+
+                if outer_attempt == 0:
+                    repository.create_message(tenant_id, thread_id, "assistant", response.get("assistant_summary", ""), run_id=run_id)
+
+                self._emit(
+                    tenant_id, run_id, "run.thinking",
+                    {"stage": "execution", "message": "Running analysis..."},
+                    force_flush=True,
+                )
+
+                python_code = response.get("python_code", "")
+                conversation_history: list[dict[str, Any]] = [
+                    {"role": "user", "parts": [{"text": build_codegen_user_prompt(effective_question, final_context)}]},
+                    {"role": "model", "parts": [{"text": codegen_raw_text}]},
+                ]
+
+                try:
+                    self._execute_with_retry(
+                        tenant_id, run_id, question, response, final_context, python_code,
+                        conversation_history=conversation_history,
+                    )
+                    break  # Success — exit outer loop
+                except ExecutionRetryExhausted as exc:
+                    prior_failure = exc.error_summary
+                    if outer_attempt >= MAX_CODEGEN_RETRY:
+                        self._fail_run(tenant_id, run_id, "execution", prior_failure)
+                        return
+                    logger.warning(
+                        "Correction loop exhausted (outer attempt %d/%d) — regenerating code from scratch",
+                        outer_attempt + 1, MAX_CODEGEN_RETRY + 1,
+                        extra={"run_id": run_id},
+                    )
 
         except RunCancelled:
             return
