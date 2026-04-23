@@ -392,6 +392,9 @@ class AskRepository:
             ],
         ) or {}
 
+    def delete_run_artifacts(self, run_id: str) -> None:
+        db.execute("DELETE FROM ask_run_artifacts WHERE run_id = %s", [run_id])
+
     def list_artifacts(self, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
         return db.fetch_all(
             """

@@ -125,15 +125,19 @@ def line_chart(
 
 
 def pie_chart(
-    df: pd.DataFrame,
-    labels: str,
-    values: str,
+    df: pd.DataFrame | None = None,
+    labels: str | None = None,
+    values: str | None = None,
     title: str = "Pie Chart",
     *,
+    data_frame: pd.DataFrame | None = None,
     show: bool = True,
 ) -> Any:
     """Build and optionally emit a pie chart."""
     go = _ensure_plotly()
+    df = data_frame if data_frame is not None else df
+    if df is None or labels is None or values is None:
+        raise ValueError("pie_chart requires a DataFrame and labels/values column names")
     fig = go.Figure(go.Pie(
         labels=df[labels],
         values=df[values],

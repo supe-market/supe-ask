@@ -287,6 +287,10 @@ class AskOrchestrator:
             {"role": "model", "parts": [{"text": correction_raw_text}]},
         ]
 
+        # Clear artifacts from the failed attempt so they don't accumulate.
+        repository.delete_run_artifacts(run_id)
+        self._emit(tenant_id, run_id, "run.artifacts.reset", {}, force_flush=True)
+
         repository.update_run(run_id, python_code=corrected_code)
         self._emit(
             tenant_id, run_id, "run.codegen.completed",

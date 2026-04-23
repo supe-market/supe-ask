@@ -189,6 +189,7 @@ Hard rules:
 - JOIN keys: prefer the columns listed in each table's joinKeys array for JOIN ON conditions.
 - Any query_df call whose SQL joins two or more tables MUST include tenant_id_column="<fact_alias>.tenant_id". Schema-only queries (e.g. information_schema) that need no tenant filter must pass tenant_id_column=None.
 - SQL column aliases must be valid identifiers — never write AS <number>.
+- Chart signatures: pie_chart(data_frame=df, labels="col", values="col", title="...") — labels/values are column name strings. bar_chart and line_chart use data_frame=df, x=, y= kwargs.
 
 Today is {today}.
 """.strip()
@@ -265,6 +266,7 @@ Hard requirements:
 - Preferred chart helper shapes are:
   - line_chart(data_frame=df, x="date_col", y="metric_col", title="Trend", labels={{"date_col": "Date", "metric_col": "Revenue"}})
   - bar_chart(data_frame=df, x="metric_col", y="category_col", orientation="h", title="Ranking", labels={{"metric_col": "Revenue", "category_col": "Distributor"}})
+  - pie_chart(data_frame=df, labels="label_col", values="value_col", title="Share") — note: labels and values are column name strings, NOT lists
 - IMPORTANT: line_chart, bar_chart, pie_chart, and waterfall_chart auto-emit the chart when called. Never call emit_plotly() on their return value — doing so emits the chart twice. Only use emit_plotly() when building a figure manually with plotly.graph_objects.
 - The assistant_summary should begin with a short interpretation of the question and, when assumptions were needed, explicitly state them before the dashboard narrative.
 - The artifact_plan.suggested_next_questions field must contain exactly 3 natural follow-up questions that a sales leader is likely to ask next.
