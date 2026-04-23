@@ -45,6 +45,7 @@ ALLOWED_IMPORT_ROOTS = {
     "plotly",
     "statistics",
     "supe_lib",
+    "time",
 }
 
 LOG_PREFIX_PATTERN = re.compile(r"^\s*(Progress|Info|Result|Debug|Warning|Error):\s*(.*)$", re.DOTALL)
